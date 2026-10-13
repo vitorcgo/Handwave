@@ -1,10 +1,12 @@
+import math
 import shutil
 import ssl
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import certifi
+import cv2
 import mediapipe as mp
 import numpy as np
 from mediapipe.tasks.python import BaseOptions, vision
@@ -17,6 +19,10 @@ MODEL_PATH = Path(__file__).resolve().parent / "hand_landmarker.task"
 
 HAND_CONNECTIONS = [(c.start, c.end) for c in vision.HandLandmarksConnections.HAND_CONNECTIONS]
 FINGERTIPS = (4, 8, 12, 16, 20)
+
+INPUT_SIZE = 640
+MATCH_DISTANCE = 0.18
+HOLD_FRAMES = 4
 
 
 @dataclass
@@ -37,49 +43,128 @@ def ensure_model() -> Path:
     return MODEL_PATH
 
 
+class OneEuroFilter:
+    """Suaviza forte quando a mão está parada e libera quando ela se move rápido."""
+
+    def __init__(self, min_cutoff: float = 1.0, beta: float = 5.0, d_cutoff: float = 1.0):
+        self.min_cutoff = min_cutoff
+        self.beta = beta
+        self.d_cutoff = d_cutoff
+        self._value: np.ndarray | None = None
+        self._speed: np.ndarray | None = None
+
+    @staticmethod
+    def _alpha(cutoff, dt):
+        tau = 1.0 / (2 * math.pi * cutoff)
+        return 1.0 / (1.0 + tau / dt)
+
+    def __call__(self, value: np.ndarray, dt: float) -> np.ndarray:
+        if self._value is None:
+            self._value = value
+            self._speed = np.zeros_like(value)
+            return value
+        dt = max(dt, 1e-3)
+        speed = (value - self._value) / dt
+        a_d = self._alpha(self.d_cutoff, dt)
+        self._speed = a_d * speed + (1 - a_d) * self._speed
+
+        magnitude = np.linalg.norm(self._speed, axis=1, keepdims=True)
+        a = self._alpha(self.min_cutoff + self.beta * magnitude, dt)
+        self._value = a * value + (1 - a) * self._value
+        return self._value
+
+
+@dataclass
+class _Track:
+    side: str
+    points: np.ndarray
+    filter: OneEuroFilter = field(default_factory=OneEuroFilter)
+    missed: int = 0
+
+    @property
+    def center(self) -> np.ndarray:
+        return self.points[[0, 5, 9, 13, 17]].mean(axis=0)
+
+
 class HandTracker:
-    def __init__(self, max_hands: int = 2, smoothing: float = 0.45):
+    def __init__(self, max_hands: int = 2):
         options = vision.HandLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=str(ensure_model())),
             running_mode=vision.RunningMode.VIDEO,
             num_hands=max_hands,
             min_hand_detection_confidence=0.6,
-            min_hand_presence_confidence=0.5,
-            min_tracking_confidence=0.5,
+            min_hand_presence_confidence=0.6,
+            min_tracking_confidence=0.6,
         )
         self._landmarker = vision.HandLandmarker.create_from_options(options)
-        self._smoothing = smoothing
-        self._previous: dict[str, list[tuple[float, float]]] = {}
+        self._tracks: list[_Track] = []
         self._last_timestamp = 0
 
     def process(self, rgb: np.ndarray, timestamp_ms: int) -> list[Hand]:
         # detect_for_video exige timestamps estritamente crescentes
         timestamp_ms = max(timestamp_ms, self._last_timestamp + 1)
+        dt = (timestamp_ms - self._last_timestamp) / 1000 if self._last_timestamp else 1 / 30
         self._last_timestamp = timestamp_ms
 
-        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
+        square, scale, offset = self._to_square(rgb)
+        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=square)
         result = self._landmarker.detect_for_video(image, timestamp_ms)
 
-        hands = []
+        detections = []
         for landmarks, handedness in zip(result.hand_landmarks, result.handedness):
-            side = handedness[0].category_name
-            points = self._smooth(side, [(p.x, p.y) for p in landmarks])
-            hands.append(Hand(side, points))
+            points = np.array([(p.x, p.y) for p in landmarks], dtype=np.float64)
+            points = (points - offset) * scale
+            detections.append((handedness[0].category_name, points))
 
-        seen = {hand.side for hand in hands}
-        self._previous = {side: pts for side, pts in self._previous.items() if side in seen}
-        return hands
+        self._update_tracks(detections, dt)
+        return [Hand(t.side, [tuple(p) for p in t.points]) for t in self._tracks]
 
-    def _smooth(self, side: str, points: list[tuple[float, float]]) -> list[tuple[float, float]]:
-        previous = self._previous.get(side)
-        if previous:
-            a = self._smoothing
-            points = [
-                (px * a + x * (1 - a), py * a + y * (1 - a))
-                for (x, y), (px, py) in zip(points, previous)
-            ]
-        self._previous[side] = points
-        return points
+    @staticmethod
+    def _to_square(rgb: np.ndarray):
+        # o MediaPipe distorce os pontos de mãos inclinadas em imagens não quadradas,
+        # então a imagem é completada com faixas pretas até virar quadrada
+        height, width = rgb.shape[:2]
+        side = max(width, height)
+        top = (side - height) // 2
+        left = (side - width) // 2
+        square = cv2.copyMakeBorder(
+            rgb, top, side - height - top, left, side - width - left, cv2.BORDER_CONSTANT, value=0
+        )
+        square = np.ascontiguousarray(cv2.resize(square, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_AREA))
+        offset = np.array([left / side, top / side])
+        scale = np.array([side / width, side / height])
+        return square, scale, offset
+
+    def _update_tracks(self, detections, dt: float):
+        unmatched = list(range(len(self._tracks)))
+        matched = []
+
+        for side, points in detections:
+            center = points[[0, 5, 9, 13, 17]].mean(axis=0)
+            best, best_distance = None, MATCH_DISTANCE
+            for index in unmatched:
+                distance = float(np.linalg.norm(self._tracks[index].center - center))
+                if distance < best_distance:
+                    best, best_distance = index, distance
+
+            if best is None:
+                track = _Track(side, points)
+                track.points = track.filter(points, dt)
+            else:
+                unmatched.remove(best)
+                track = self._tracks[best]
+                track.side = side
+                track.missed = 0
+                track.points = track.filter(points, dt)
+            matched.append(track)
+
+        for index in unmatched:
+            track = self._tracks[index]
+            track.missed += 1
+            if track.missed <= HOLD_FRAMES:
+                matched.append(track)
+
+        self._tracks = matched
 
     def close(self):
         self._landmarker.close()
