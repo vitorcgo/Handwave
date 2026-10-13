@@ -1,5 +1,6 @@
 from functools import cache
 
+import numpy as np
 from PySide6.QtCore import QPointF, QRectF
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QRadialGradient
 
@@ -32,6 +33,19 @@ def draw_glow(p: QPainter, x: float, y: float, radius: float, opacity: float, ti
     diameter = max(2, round(radius * 2))
     p.setOpacity(max(0.0, min(opacity, 1.0)))
     p.drawImage(QPointF(x - diameter / 2, y - diameter / 2), glow_sprite(tint, diameter))
+
+
+def frame_to_array(frame: QImage) -> np.ndarray:
+    """Quadro da câmera como array RGB, sem cópia quando o formato já bate."""
+    frame = frame.convertToFormat(QImage.Format.Format_RGB888)
+    data = np.frombuffer(frame.constBits(), np.uint8).reshape(frame.height(), frame.bytesPerLine())
+    return data[:, : frame.width() * 3].reshape(frame.height(), frame.width(), 3)
+
+
+def array_to_image(rgb: np.ndarray) -> QImage:
+    rgb = np.ascontiguousarray(rgb)
+    height, width = rgb.shape[:2]
+    return QImage(rgb.data, width, height, width * 3, QImage.Format.Format_RGB888).copy()
 
 
 @cache

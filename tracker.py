@@ -35,16 +35,17 @@ class Hand:
     world: np.ndarray | None = None
 
 
-def ensure_model() -> Path:
-    if MODEL_PATH.exists():
-        return MODEL_PATH
-    partial = MODEL_PATH.with_suffix(".part")
+def ensure_model(url: str = MODEL_URL, path: Path = MODEL_PATH) -> Path:
+    """Baixa o modelo na primeira execução e devolve o caminho local."""
+    if path.exists():
+        return path
+    partial = path.with_suffix(".part")
     context = ssl.create_default_context(cafile=certifi.where())
-    with urllib.request.urlopen(MODEL_URL, context=context, timeout=30) as response:
+    with urllib.request.urlopen(url, context=context, timeout=30) as response:
         with open(partial, "wb") as file:
             shutil.copyfileobj(response, file)
-    partial.replace(MODEL_PATH)
-    return MODEL_PATH
+    partial.replace(path)
+    return path
 
 
 class OneEuroFilter:

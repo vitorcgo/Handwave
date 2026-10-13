@@ -33,6 +33,8 @@ class HandPose:
     velocity: np.ndarray
     # maior velocidade dos últimos instantes; segura gestos rápidos em que o rastreador perde a mão
     peak_velocity: np.ndarray
+    # pontos 3D em metros (x para a direita, y para baixo, z se afastando da câmera)
+    world: np.ndarray | None = None
 
     @property
     def index_tip(self) -> np.ndarray:
@@ -119,7 +121,7 @@ class GestureReader:
             pointing = self._debounce(hand.id, "pointing", index, frozen)
             was_l = self._stable.get((hand.id, "l_shape"), (False, 0))[0]
             l_shape = self._debounce(hand.id, "l_shape", _is_l_shape(joints, points, palm, index, was_l), frozen)
-            poses.append(HandPose(hand.id, points, palm, pointing, l_shape, velocity, peak))
+            poses.append(HandPose(hand.id, points, palm, pointing, l_shape, velocity, peak, hand.world))
 
         seen = {pose.id for pose in poses}
         self._previous = {key: value for key, value in self._previous.items() if key in seen}

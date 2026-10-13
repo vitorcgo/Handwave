@@ -7,14 +7,20 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPolygonF
 
 from effects.base import Effect
-from gestures import INDEX_MCP, THUMB_TIP, WRIST, HandPose
+from effects.render import array_to_image, frame_to_array
+from gestures import INDEX_MCP, INDEX_TIP, THUMB_TIP, WRIST, HandPose
 
 FILTER_SIZE = (640, 360)
-DEPTH = 0.9
-BACK_SCALE = 0.85
+FOCAL = 1400.0
 OPEN_THUMB = 0.45
 FOLLOW = 18.0
 HOLD_TIME = 0.45
+# com as mãos em pé, a face branca fica de frente para a câmera
+BASE_ROLL = math.radians(30)
+
+# filtro de cada uma das três faces, na ordem em que giram
+FACE_TEXTURES = ("sketch", "thermal", "dots")
+CAP_TEXTURE = "thermal"
 
 _LIGHT = (np.arange(256, dtype=np.float32) / 255) ** 1.4
 _NAVY = np.array([6, 16, 48], np.float32)
@@ -24,33 +30,25 @@ DOTS_CHANCE = (_LIGHT * 0.85 * 255).astype(np.uint8)
 DOTS_SPARK = _CYAN.astype(np.uint8)
 
 
-def _to_array(frame: QImage) -> np.ndarray:
-    frame = frame.convertToFormat(QImage.Format.Format_RGB888)
-    data = np.frombuffer(frame.constBits(), np.uint8).reshape(frame.height(), frame.bytesPerLine())
-    return data[:, : frame.width() * 3].reshape(frame.height(), frame.width(), 3)
-
-
-def _to_image(rgb: np.ndarray) -> QImage:
-    rgb = np.ascontiguousarray(rgb)
-    height, width = rgb.shape[:2]
-    return QImage(rgb.data, width, height, width * 3, QImage.Format.Format_RGB888).copy()
-
-
 def _polygon(points) -> QPolygonF:
     return QPolygonF([QPointF(float(x), float(y)) for x, y in points])
 
 
-class Prism(Effect):
-    """Caixa 3D entre as duas mãos abertas.
+def _wrap(angle: float) -> float:
+    return (angle + math.pi) % (2 * math.pi) - math.pi
 
-    A face da frente vai do indicador ao polegar de cada mão e as laterais seguem a
-    perspectiva da câmera. Cada face é uma lente que mostra o vídeo com um filtro.
+
+class Prism(Effect):
+    """Prisma triangular entre as duas mãos abertas.
+
+    O eixo vai de uma mão à outra e o tamanho segue a abertura entre indicador e polegar.
+    Inclinar os pulsos para a frente ou para trás gira o prisma no eixo. Cada face é uma
+    lente com um filtro: branco, térmico e pontos azuis.
     """
 
     name = "Prisma"
     icon = (
-        '<path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4'
-        'a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>'
+        '<path d="M12 3 3 19h18Z"/><path d="M12 3v16"/>'
     )
     wants_frame = True
 
@@ -61,11 +59,15 @@ class Prism(Effect):
         self._spark: np.ndarray | None = None
         self._worker = ThreadPoolExecutor(max_workers=1)
         self._job: Future | None = None
-        self._front: np.ndarray | None = None
-        self._target: np.ndarray | None = None
+
         self._visible = 0.0
         self._hold = 0.0
         self._pair: tuple[int, int] | None = None
+
+        self._target: tuple[np.ndarray, float, float] | None = None
+        self._axis: np.ndarray | None = None
+        self._radius = 0.0
+        self._roll = 0.0
 
     # entrada
 
@@ -77,8 +79,70 @@ class Prism(Effect):
         if self._job is not None:
             # os filtros do quadro anterior ainda estão rodando; este quadro é pulado
             return
-        small = cv2.resize(_to_array(frame), FILTER_SIZE, interpolation=cv2.INTER_AREA)
+        small = cv2.resize(frame_to_array(frame), FILTER_SIZE, interpolation=cv2.INTER_AREA)
         self._job = self._worker.submit(self._build_textures, small)
+
+    def set_hands(self, poses: list[HandPose]):
+        by_id = {pose.id: pose for pose in poses}
+        open_hands = [pose for pose in poses if self._is_open(pose)]
+        if len(open_hands) >= 2:
+            pair = open_hands[:2]
+            self._pair = (pair[0].id, pair[1].id)
+            self._hold = HOLD_TIME
+        elif self._hold > 0 and self._pair and all(i in by_id for i in self._pair):
+            # o gesto falhou por um instante, mas as mesmas mãos continuam na tela: o prisma segue com elas
+            pair = [by_id[i] for i in self._pair]
+        else:
+            return
+
+        left, right = sorted(pair, key=lambda pose: pose.points[WRIST][0])
+        start = (left.index_tip + left.points[THUMB_TIP]) / 2
+        end = (right.index_tip + right.points[THUMB_TIP]) / 2
+        axis = np.array([start, end])
+        radius = (self._opening(left) + self._opening(right)) / 4
+        roll = self._mean_angle([self._hand_roll(left, axis), self._hand_roll(right, axis)])
+        self._target = (axis, radius, roll)
+
+    @staticmethod
+    def _is_open(pose: HandPose) -> bool:
+        gap = float(np.linalg.norm(pose.points[THUMB_TIP] - pose.points[INDEX_MCP]))
+        return pose.pointing and gap > pose.palm * OPEN_THUMB
+
+    @staticmethod
+    def _opening(pose: HandPose) -> float:
+        return float(np.linalg.norm(pose.index_tip - pose.points[THUMB_TIP]))
+
+    @staticmethod
+    def _hand_roll(pose: HandPose, axis: np.ndarray) -> float:
+        """Quanto a mão está inclinada para a câmera, pelo vetor do polegar ao indicador em 3D."""
+        if pose.world is None:
+            return 0.0
+        up = Prism._up(axis)
+        vector = pose.world[INDEX_TIP] - pose.world[THUMB_TIP]
+        along_screen = float(vector[0] * up[0] + vector[1] * up[1])
+        toward_camera = float(-vector[2])
+        return math.atan2(toward_camera, along_screen)
+
+    @staticmethod
+    def _mean_angle(angles: list[float]) -> float:
+        return math.atan2(sum(math.sin(a) for a in angles), sum(math.cos(a) for a in angles))
+
+    @staticmethod
+    def _up(axis: np.ndarray) -> np.ndarray:
+        """Direção perpendicular ao eixo, apontando para cima na tela."""
+        direction = axis[1] - axis[0]
+        direction = direction / max(float(np.linalg.norm(direction)), 1e-6)
+        up = np.array([direction[1], -direction[0]])
+        return up if up[1] <= 0 else -up
+
+    @property
+    def _active(self) -> bool:
+        return self._hold > 0
+
+    def close(self):
+        self._worker.shutdown(wait=False, cancel_futures=True)
+
+    # filtros
 
     def _collect(self):
         if self._job is not None and self._job.done():
@@ -89,44 +153,10 @@ class Prism(Effect):
         # roda fora da thread da interface; OpenCV e numpy liberam o Python enquanto processam
         gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
         return {
-            "thermal": _to_image(self._thermal(gray)),
-            "dots": _to_image(self._dots(gray)),
-            "sketch": _to_image(self._sketch(gray)),
+            "thermal": array_to_image(self._thermal(gray)),
+            "dots": array_to_image(self._dots(gray)),
+            "sketch": array_to_image(self._sketch(gray)),
         }
-
-    def set_hands(self, poses: list[HandPose]):
-        by_id = {pose.id: pose for pose in poses}
-        open_hands = [pose for pose in poses if self._is_open(pose)]
-        if len(open_hands) >= 2:
-            pair = open_hands[:2]
-            self._pair = (pair[0].id, pair[1].id)
-            self._hold = HOLD_TIME
-        elif self._hold > 0 and self._pair and all(i in by_id for i in self._pair):
-            # o gesto falhou por um instante, mas as mesmas mãos continuam na tela: a caixa segue com elas
-            pair = [by_id[i] for i in self._pair]
-        else:
-            return
-        left, right = sorted(pair, key=lambda pose: pose.points[WRIST][0])
-        self._target = np.array([
-            left.index_tip,
-            right.index_tip,
-            right.points[THUMB_TIP],
-            left.points[THUMB_TIP],
-        ])
-
-    @property
-    def _active(self) -> bool:
-        return self._hold > 0
-
-    def close(self):
-        self._worker.shutdown(wait=False, cancel_futures=True)
-
-    @staticmethod
-    def _is_open(pose: HandPose) -> bool:
-        gap = float(np.linalg.norm(pose.points[THUMB_TIP] - pose.points[INDEX_MCP]))
-        return pose.pointing and gap > pose.palm * OPEN_THUMB
-
-    # filtros
 
     @staticmethod
     def _thermal(gray: np.ndarray) -> np.ndarray:
@@ -161,62 +191,89 @@ class Prism(Effect):
         self._visible += (target - self._visible) * (1 - math.exp(-dt * (8 if self._active else 4)))
         if self._target is None:
             return
-        if self._front is None or self._visible < 0.02:
-            self._front = self._target.copy()
-        else:
-            self._front += (self._target - self._front) * (1 - math.exp(-dt * FOLLOW))
+
+        axis, radius, roll = self._target
+        if self._axis is None or self._visible < 0.02:
+            self._axis, self._radius, self._roll = axis.copy(), radius, roll
+            return
+        k = 1 - math.exp(-dt * FOLLOW)
+        self._axis += (axis - self._axis) * k
+        self._radius += (radius - self._radius) * k
+        self._roll += _wrap(roll - self._roll) * (1 - math.exp(-dt * 10))
 
     @property
     def idle(self) -> bool:
         return not self._active and self._visible < 0.005
 
-    @staticmethod
-    def _back_face(front: np.ndarray, width: int, height: int) -> np.ndarray:
-        # a caixa se estende para o centro da tela, então a face voltada para fora sempre aparece;
-        # a profundidade acompanha a altura da frente para manter a proporção ao aproximar as mãos
-        center = front.mean(axis=0)
-        toward = np.array([width / 2, height / 2]) - center
-        distance = float(np.linalg.norm(toward))
-        direction = toward / distance if distance > 1 else np.array([0.0, 1.0])
-        face_height = float(np.linalg.norm((front[2] + front[3]) / 2 - (front[0] + front[1]) / 2))
-        return center + (front - center) * BACK_SCALE + direction * max(face_height, 40.0) * DEPTH
+    # geometria
+
+    def _faces(self) -> list[tuple[str, list[np.ndarray], float]]:
+        """Faces visíveis já projetadas, com o filtro e o quanto cada uma está de frente."""
+        width, height = self._size
+        center = np.array([width / 2, height / 2])
+        camera = np.array([center[0], center[1], FOCAL])
+
+        start, end = self._axis
+        direction = end - start
+        direction = direction / max(float(np.linalg.norm(direction)), 1e-6)
+        up = self._up(self._axis)
+
+        angles = BASE_ROLL + self._roll + np.array([0.0, 2 * math.pi / 3, 4 * math.pi / 3])
+        offsets = np.stack(
+            [np.cos(angles) * up[0], np.cos(angles) * up[1], np.sin(angles)], axis=1
+        ) * self._radius
+        near = np.append(start, 0.0) + offsets
+        far = np.append(end, 0.0) + offsets
+
+        def project(points3d: np.ndarray) -> list[np.ndarray]:
+            # perspectiva simples a partir do centro da câmera; z positivo fica mais perto
+            scale = FOCAL / (FOCAL - points3d[:, 2])
+            return list(center + (points3d[:, :2] - center) * scale[:, None])
+
+        faces = []
+        for k in range(3):
+            j = (k + 1) % 3
+            quad = np.array([near[k], far[k], far[j], near[j]])
+            middle = angles[k] + math.pi / 3
+            normal = np.array([math.cos(middle) * up[0], math.cos(middle) * up[1], math.sin(middle)])
+            faces.append((FACE_TEXTURES[k], quad, normal))
+
+        axis3d = np.append(direction, 0.0)
+        faces.append((CAP_TEXTURE, near, -axis3d))
+        faces.append((CAP_TEXTURE, far, axis3d))
+
+        visible = []
+        for texture, corners, normal in faces:
+            view = camera - corners.mean(axis=0)
+            facing = float(np.dot(normal, view) / np.linalg.norm(view))
+            if facing > 0:
+                visible.append((texture, project(corners), facing))
+        return visible
 
     # desenho
 
     def draw(self, p: QPainter):
-        if self._front is None or self._visible < 0.01 or not self._textures:
+        if self._axis is None or self._visible < 0.01 or not self._textures:
             return
         width, height = self._size
-        front = self._front
-        back = self._back_face(front, width, height)
         frame_rect = QRectF(0, 0, width, height)
-
-        faces = [
-            ("dots", [front[0], front[1], back[1], back[0]], 0.92),
-            ("sketch", [front[1], front[2], back[2], back[1]], 0.85),
-            ("dots", [front[2], front[3], back[3], back[2]], 0.92),
-            ("sketch", [front[3], front[0], back[0], back[3]], 0.85),
-            ("thermal", list(front), 1.0),
-        ]
+        faces = self._faces()
 
         p.save()
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        for texture, corners, shade in faces:
+        for texture, corners, facing in faces:
             path = QPainterPath()
             path.addPolygon(_polygon(corners))
             path.closeSubpath()
             p.save()
             p.setClipPath(path)
-            p.setOpacity(self._visible * shade)
+            p.setOpacity(self._visible * (0.55 + 0.45 * facing))
             p.drawImage(frame_rect, self._textures[texture])
             p.restore()
 
         p.setOpacity(self._visible)
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(QColor(255, 255, 255, 220), 1.4))
-        p.drawPolygon(_polygon(front))
-        p.setPen(QPen(QColor(255, 255, 255, 110), 1))
-        p.drawPolygon(_polygon(back))
-        for a, b in zip(front, back):
-            p.drawLine(QPointF(*a), QPointF(*b))
+        p.setPen(QPen(QColor(255, 255, 255, 210), 1.3))
+        for _, corners, _ in faces:
+            p.drawPolygon(_polygon(corners))
         p.restore()

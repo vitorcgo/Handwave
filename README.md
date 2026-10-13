@@ -210,27 +210,51 @@ stateDiagram-v2
 
 ### Prisma
 
-<img src="https://api.iconify.design/lucide/box.svg?color=%234078ff" width="20"> Uma caixa 3D presa entre as duas mãos abertas, em que cada face funciona como uma lente com um filtro diferente sobre o vídeo.
+<img src="https://api.iconify.design/lucide/triangle.svg?color=%234078ff" width="20"> Um prisma triangular em 3D com o eixo entre as duas mãos abertas. Cada uma das três faces é uma lente com um filtro diferente sobre o vídeo, e as pontas triangulares aparecem nas extremidades conforme a perspectiva.
 
 ```mermaid
 flowchart LR
     A[Quadro da câmera] --> B[Thread de filtros]
-    B --> C[Térmico]
-    B --> D[Pontos azuis]
-    B --> E[Lápis]
-    C --> F[Face da frente]
-    D --> G[Topo e fundo]
-    E --> H[Laterais]
-    F & G & H --> I[Caixa entre as mãos]
+    B --> C[Branco, lápis]
+    B --> D[Térmico]
+    B --> E[Pontos azuis]
+    C & D & E --> F[Três faces do prisma]
+    G[Inclinação dos pulsos em 3D] --> H[Giro no eixo]
+    H --> F
 ```
 
 | Gesto | Resultado |
 |---|---|
-| Abrir as duas mãos com indicador e polegar afastados | A caixa aparece com a frente indo do indicador ao polegar de cada mão |
-| Mover, aproximar ou afastar as mãos | A caixa estica, encolhe e acompanha, sempre se estendendo para o centro da tela |
-| Fechar as mãos | A caixa desaparece |
+| Abrir as duas mãos com indicador e polegar afastados | O prisma aparece entre as mãos, com a face branca de frente |
+| Inclinar os pulsos para a frente ou para trás | O prisma gira no próprio eixo e mostra as faces térmica e de pontos azuis |
+| Abrir mais ou menos indicador e polegar | O prisma engrossa ou afina |
+| Fechar as mãos | O prisma desaparece |
 
-Os filtros rodam numa thread separada, em 640x360, e custam menos de 1 ms na thread da interface.
+O giro é lido pelos pontos 3D do MediaPipe: o vetor do polegar ao indicador mostra quanto cada mão está inclinada para a câmera. Os filtros rodam numa thread separada, em 640x360, e custam menos de 1 ms na thread da interface.
+
+### Vidro
+
+<img src="https://api.iconify.design/lucide/ghost.svg?color=%234078ff" width="20"> Uma janela retangular entre as pontas dos dois indicadores. Dentro dela a pessoa vira vidro: o fundo aparece através dela, distorcido nas bordas, com brilhos finos no contorno.
+
+```mermaid
+flowchart LR
+    A[Quadro da câmera] --> B[Segmentação de pessoa<br/>MediaPipe Selfie Segmenter]
+    B --> C{Pixel é fundo?}
+    C -- Sim --> D[Memória do fundo]
+    C -- Não --> E[Silhueta]
+    D --> F[Refração pela borda da silhueta]
+    E --> F
+    F --> G[Brilhos no contorno]
+    G --> H[Janela entre os indicadores]
+```
+
+| Gesto | Resultado |
+|---|---|
+| Apontar com as duas mãos | A janela aparece com os cantos nas pontas dos indicadores |
+| Mover as mãos | A janela estica e acompanha |
+| Abaixar um dos indicadores | A janela desaparece |
+
+O fundo é memorizado sozinho pelas partes que a pessoa não cobre, enquanto o efeito está ligado. Onde o fundo ainda não foi visto, aparece um borrão e um aviso pedindo para sair da frente por um instante. O modelo de segmentação (244 KB) é baixado na primeira vez. O processamento roda numa thread separada, em cerca de 27 ms por quadro.
 
 ### Tolerância a movimentos bruscos
 
@@ -308,7 +332,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Na primeira execução o modelo de mãos (cerca de 7 MB) é baixado para a raiz do projeto. Depois disso o app abre direto.
+Na primeira execução o modelo de mãos (cerca de 7 MB) é baixado para a raiz do projeto, e o de segmentação (244 KB) na primeira vez que o Vidro é ligado. Depois disso o app abre direto.
 
 ### Modo de desenvolvimento
 
@@ -342,6 +366,7 @@ flowchart LR
 | `M` | Espelhar a imagem |
 | `1` | Ligar ou desligar a Bola de energia |
 | `2` | Ligar ou desligar o Prisma |
+| `3` | Ligar ou desligar o Vidro |
 | `C` | Trocar de câmera |
 | `Espaço` | Pausar ou continuar |
 | `S` | Salvar foto |
@@ -375,9 +400,10 @@ Handwave/
 ├── effects/
 │   ├── __init__.py      Registro dos efeitos
 │   ├── base.py          Contrato de um efeito
-│   ├── render.py        Brilho e fonte compartilhados
+│   ├── render.py        Brilho, fonte e conversão de imagens compartilhados
 │   ├── energy_ball.py   Bola de energia
-│   └── prism.py         Prisma
+│   ├── prism.py         Prisma
+│   └── glass.py         Vidro
 ├── iniciar_windows.bat  Prepara e abre o app no Windows
 ├── iniciar_mac.command  Prepara e abre o app no macOS
 ├── blur.py              Efeito de vidro no Windows
@@ -414,10 +440,10 @@ flowchart LR
     end
     subgraph F2[Fase 2: Efeitos]
         B1[Bola de energia]
-        B2[Ondas]
-        B3[Foco]
-        B4[Fogo]
-        B5[Gelo]
+        B2[Prisma]
+        B3[Vidro]
+        B4[Ondas]
+        B5[Fogo]
     end
     subgraph F3[Fase 3: Interação]
         C1[Reconhecimento de gestos]
@@ -432,10 +458,12 @@ flowchart LR
 - [x] Interface de vidro com controles na barra lateral
 - [x] Mostrar mãos, espelhar, trocar câmera, pausar e salvar foto
 - [x] **Bola de energia:** orbe no indicador, passagem entre as mãos por peteleco e expansão com o gesto de L
+- [x] **Prisma:** prisma triangular entre as mãos com faces branca, térmica e de pontos azuis
+- [x] **Vidro:** janela entre os indicadores em que a pessoa fica transparente
+- [x] Inicializadores para Windows e macOS
 - [ ] **Ondas:** rastros suaves que seguem as pontas dos dedos
-- [ ] **Foco:** um anel que acompanha a pinça entre polegar e indicador
 - [ ] **Fogo:** chamas saindo das pontas dos dedos, com intensidade pela velocidade da mão
-- [ ] **Gelo:** cristais que crescem a partir da palma aberta
+- [ ] Gravação de vídeo com os efeitos aplicados
 - [ ] Reconhecimento de gestos: pinça, punho fechado, mão aberta e apontar
 - [ ] Controle do sistema por gestos, como volume, mídia e troca de janelas
 - [ ] Tela de configurações: câmera, sensibilidade e número de mãos
