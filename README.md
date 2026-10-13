@@ -172,6 +172,17 @@ flowchart LR
 | `set_hands(poses)` | A cada quadro novo da câmera | Ler as mãos e decidir o que o efeito faz |
 | `tick(dt)` | 60 vezes por segundo | Animar, mesmo entre quadros da câmera |
 | `draw(painter)` | A cada repintura | Desenhar por cima do vídeo, em pixels do quadro |
+| `set_frame(imagem)` | A cada quadro, só se `wants_frame` for verdadeiro | Receber os pixels da câmera para filtrar |
+| `dim` | Antes de desenhar | De 0 a 1, quanto o vídeo escurece por baixo do efeito |
+| `idle` | A cada tick | Quando verdadeiro, a tela para de repintar a 60 fps |
+| `close()` | Ao desligar o efeito | Liberar threads e recursos |
+
+### Desempenho
+
+- O quadro da câmera é redimensionado uma vez por quadro novo, não a cada repintura
+- Os brilhos das partículas usam sprites prontos em cada tamanho, sem redimensionar na hora
+- Os números são textos pré-calculados e as linhas da rede são desenhadas em lotes
+- Sem efeito aceso, a animação não repinta a tela
 
 ### Bola de energia
 
@@ -184,17 +195,49 @@ stateDiagram-v2
     Voando --> NoDedo: chega ao indicador da outra mão
     NoDedo --> Expandida: L com a outra mão
     Expandida --> NoDedo: desfaz o L
-    NoDedo --> [*]: mão sai da câmera
+    NoDedo --> [*]: mão fechada ou fora da câmera
 ```
 
 | Gesto | Resultado |
 |---|---|
-| Apontar com o indicador | A bola aparece e acompanha a ponta do dedo |
+| Apontar com o indicador | A bola acende com uma explosão de faíscas e acompanha a ponta do dedo |
+| Fechar a mão que segura a bola | Depois de um instante a bola se apaga; apontar de novo acende outra vez |
 | Peteleco rápido na direção da outra mão | A bola voa em arco até o outro indicador, deixando rastro |
-| L com a outra mão | A bola se abre num disco de partículas em perspectiva, centrado no dedo que a segura; quanto mais longe a mão do L, maior o disco |
+| L com a outra mão | A bola se abre num disco de partículas em perspectiva, centrado no dedo que a segura, com as partículas numeradas ligadas em rede; quanto mais longe a mão do L, maior o disco |
 | Girar a mão do L | O disco gira junto, como um botão giratório |
 | Mover a mão que segura | O disco acompanha o dedo |
 | Desfazer o L | O disco se recolhe de volta para a bola |
+
+### Prisma
+
+<img src="https://api.iconify.design/lucide/box.svg?color=%234078ff" width="20"> Uma caixa 3D presa entre as duas mãos abertas, em que cada face funciona como uma lente com um filtro diferente sobre o vídeo.
+
+```mermaid
+flowchart LR
+    A[Quadro da câmera] --> B[Thread de filtros]
+    B --> C[Térmico]
+    B --> D[Pontos azuis]
+    B --> E[Lápis]
+    C --> F[Face da frente]
+    D --> G[Topo e fundo]
+    E --> H[Laterais]
+    F & G & H --> I[Caixa entre as mãos]
+```
+
+| Gesto | Resultado |
+|---|---|
+| Abrir as duas mãos com indicador e polegar afastados | A caixa aparece com a frente indo do indicador ao polegar de cada mão |
+| Mover, aproximar ou afastar as mãos | A caixa estica, encolhe e acompanha, sempre se estendendo para o centro da tela |
+| Fechar as mãos | A caixa desaparece |
+
+Os filtros rodam numa thread separada, em 640x360, e custam menos de 1 ms na thread da interface.
+
+### Tolerância a movimentos bruscos
+
+Com a mão em movimento rápido, o borrão engana a leitura dos gestos. Por isso:
+
+- Enquanto a ponta do indicador passa de 900 px/s, o gesto lido fica congelado no último valor
+- Os efeitos toleram o gesto falhar por alguns décimos de segundo: a bola continua aberta e o prisma continua preso às mesmas mãos
 
 ### Criando um efeito novo
 
@@ -209,6 +252,30 @@ Com `python dev.py` rodando, o app recarrega a cada arquivo salvo.
 ## Instalação
 
 **Requisitos:** Python 3.10 ou superior e uma webcam.
+
+### Jeito rápido
+
+Os inicializadores criam o ambiente virtual, instalam as dependências e abrem o app. Na primeira vez demoram alguns minutos; depois abrem direto.
+
+| Sistema | Como abrir |
+|---|---|
+| <img src="https://api.iconify.design/simple-icons/windows.svg?color=%234078ff" width="18"> Windows | Duplo clique em `iniciar_windows.bat` |
+| <img src="https://api.iconify.design/simple-icons/apple.svg?color=%234078ff" width="18"> macOS | Duplo clique em `iniciar_mac.command` |
+
+No macOS, se o sistema bloquear o arquivo na primeira vez, clique com o botão direito e escolha Abrir. Se aparecer erro de permissão, rode `chmod +x iniciar_mac.command` no Terminal. O Terminal também vai pedir acesso à câmera.
+
+```mermaid
+flowchart LR
+    A[Duplo clique] --> B{Python 3.10+?}
+    B -- Não --> C[Mostra onde baixar]
+    B -- Sim --> D{.venv existe?}
+    D -- Não --> E[Cria o ambiente virtual]
+    D -- Sim --> F[Confere as dependências]
+    E --> F
+    F --> G[Abre o Handwave]
+```
+
+### Jeito manual
 
 ```bash
 git clone https://github.com/<seu-usuario>/Handwave.git
@@ -265,6 +332,21 @@ flowchart LR
 | Mover a janela | Arraste pela faixa superior |
 | Redimensionar | Arraste qualquer borda |
 | Maximizar | Botão no canto superior direito ou duplo clique na faixa superior |
+| Tela cheia | Tecla F, só com a câmera na tela; Esc para sair |
+
+### Atalhos
+
+| Tecla | Ação |
+|:-:|---|
+| `H` | Mostrar ou ocultar o traçado das mãos |
+| `M` | Espelhar a imagem |
+| `1` | Ligar ou desligar a Bola de energia |
+| `2` | Ligar ou desligar o Prisma |
+| `C` | Trocar de câmera |
+| `Espaço` | Pausar ou continuar |
+| `S` | Salvar foto |
+| `F` | Tela cheia |
+| `Esc` | Sair da tela cheia |
 
 ### Barra lateral
 
@@ -294,7 +376,10 @@ Handwave/
 │   ├── __init__.py      Registro dos efeitos
 │   ├── base.py          Contrato de um efeito
 │   ├── render.py        Brilho e fonte compartilhados
-│   └── energy_ball.py   Bola de energia
+│   ├── energy_ball.py   Bola de energia
+│   └── prism.py         Prisma
+├── iniciar_windows.bat  Prepara e abre o app no Windows
+├── iniciar_mac.command  Prepara e abre o app no macOS
 ├── blur.py              Efeito de vidro no Windows
 ├── logo.png             Identidade visual
 └── requirements.txt     Dependências

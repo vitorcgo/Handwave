@@ -2,7 +2,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, QStandardPaths, Qt
-from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QShortcut
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from blur import enable_blur, set_round_region
@@ -12,6 +12,7 @@ from widgets import CameraView, Separator, SideButton, TitleBar
 
 RADIUS = 26
 RESIZE_MARGIN = 6
+BODY_MARGINS = (26, 0, 40, 40)
 
 
 class MainWindow(QWidget):
@@ -34,30 +35,31 @@ class MainWindow(QWidget):
 
         self.camera_view = CameraView(self)
 
-        self.hands_button = SideButton("hand", "Ocultar traçado das mãos")
+        self.hands_button = SideButton("hand", "Ocultar traçado das mãos  (H)")
         self.hands_button.setChecked(True)
         self.hands_button.toggled.connect(self._set_show_hands)
 
-        self.mirror_button = SideButton("mirror", "Espelhar imagem")
+        self.mirror_button = SideButton("mirror", "Espelhar imagem  (M)")
         self.mirror_button.setChecked(True)
         self.mirror_button.toggled.connect(self._set_mirror)
 
         self.effect_buttons = []
-        for effect_class in EFFECTS:
-            button = SideButton(effect_class.icon, effect_class.name)
+        for number, effect_class in enumerate(EFFECTS, start=1):
+            button = SideButton(effect_class.icon, f"{effect_class.name}  ({number})")
             button.toggled.connect(lambda on, cls=effect_class, b=button: self._toggle_effect(cls, b, on))
             self.effect_buttons.append(button)
 
-        self.switch_button = SideButton("switch", "Trocar câmera", checkable=False)
+        self.switch_button = SideButton("switch", "Trocar câmera  (C)", checkable=False)
         self.switch_button.clicked.connect(self._switch_camera)
 
-        self.pause_button = SideButton("pause", "Pausar")
+        self.pause_button = SideButton("pause", "Pausar  (Espaço)")
         self.pause_button.toggled.connect(self._set_paused)
 
-        self.photo_button = SideButton("photo", "Salvar foto", checkable=False)
+        self.photo_button = SideButton("photo", "Salvar foto  (S)", checkable=False)
         self.photo_button.clicked.connect(self._save_photo)
 
-        sidebar = QVBoxLayout()
+        self.sidebar = QWidget(self)
+        sidebar = QVBoxLayout(self.sidebar)
         sidebar.setContentsMargins(0, 0, 0, 0)
         sidebar.setSpacing(4)
         sidebar.addStretch()
@@ -73,17 +75,19 @@ class MainWindow(QWidget):
         sidebar.addWidget(self.photo_button)
         sidebar.addStretch()
 
-        body = QHBoxLayout()
-        body.setContentsMargins(26, 0, 40, 40)
-        body.setSpacing(26)
-        body.addLayout(sidebar)
-        body.addWidget(self.camera_view, 1)
+        self.body = QHBoxLayout()
+        self.body.setContentsMargins(*BODY_MARGINS)
+        self.body.setSpacing(26)
+        self.body.addWidget(self.sidebar)
+        self.body.addWidget(self.camera_view, 1)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 8, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(self.title_bar)
-        layout.addLayout(body, 1)
+        self.root = QVBoxLayout(self)
+        self.root.setContentsMargins(0, 8, 0, 0)
+        self.root.setSpacing(0)
+        self.root.addWidget(self.title_bar)
+        self.root.addLayout(self.body, 1)
+
+        self._add_shortcuts()
 
         self.worker = CameraWorker()
         self.worker.frame_ready.connect(self._on_frame)
@@ -94,6 +98,50 @@ class MainWindow(QWidget):
         if self.effect_buttons:
             self.effect_buttons[0].setChecked(True)
 
+    def _add_shortcuts(self):
+        keys = {
+            "H": self.hands_button.toggle,
+            "M": self.mirror_button.toggle,
+            "C": self.switch_button.click,
+            "Space": self.pause_button.toggle,
+            "S": self.photo_button.click,
+            "F": self._toggle_fullscreen,
+            "Esc": self._exit_fullscreen,
+        }
+        for number, button in enumerate(self.effect_buttons, start=1):
+            keys[str(number)] = button.toggle
+        for key, action in keys.items():
+            QShortcut(QKeySequence(key), self, activated=action)
+
+    def _toggle_fullscreen(self):
+        if self.isFullScreen():
+            self._exit_fullscreen()
+            return
+        self._was_maximized = self.isMaximized()
+        self.title_bar.hide()
+        self.sidebar.hide()
+        self.body.setContentsMargins(0, 0, 0, 0)
+        self.root.setContentsMargins(0, 0, 0, 0)
+        self.camera_view.radius = 0
+        self.showFullScreen()
+        self.camera_view.show_toast("Tela cheia. Esc para sair")
+
+    def _exit_fullscreen(self):
+        if not self.isFullScreen():
+            return
+        self.title_bar.show()
+        self.sidebar.show()
+        self.body.setContentsMargins(*BODY_MARGINS)
+        self.root.setContentsMargins(0, 8, 0, 0)
+        self.camera_view.radius = CameraView.RADIUS
+        if getattr(self, "_was_maximized", False):
+            self.showMaximized()
+        else:
+            self.showNormal()
+
+    def _square_corners(self) -> bool:
+        return self.isMaximized() or self.isFullScreen()
+
     def _on_frame(self, frame, hands, fps):
         self.camera_view.set_frame(frame, hands)
 
@@ -103,7 +151,7 @@ class MainWindow(QWidget):
 
     def _set_show_hands(self, visible):
         self.camera_view.show_hands = visible
-        self.hands_button.setToolTip("Ocultar traçado das mãos" if visible else "Mostrar traçado das mãos")
+        self.hands_button.setToolTip(f"{'Ocultar' if visible else 'Mostrar'} traçado das mãos  (H)")
         self.camera_view.update()
 
     def _toggle_effect(self, effect_class, button, on):
@@ -123,7 +171,7 @@ class MainWindow(QWidget):
         self.worker.paused = paused
         self.camera_view.paused = paused
         self.pause_button.set_icon("play" if paused else "pause")
-        self.pause_button.setToolTip("Continuar" if paused else "Pausar")
+        self.pause_button.setToolTip(f"{'Continuar' if paused else 'Pausar'}  (Espaço)")
         self.camera_view.update()
 
     def _switch_camera(self):
@@ -165,14 +213,14 @@ class MainWindow(QWidget):
         if not self._blurred:
             return
         ratio = self.devicePixelRatioF()
-        radius = 0 if self.isMaximized() else round(RADIUS * ratio)
+        radius = 0 if self._square_corners() else round(RADIUS * ratio)
         set_round_region(self._hwnd, round(self.width() * ratio), round(self.height() * ratio), radius)
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        radius = 0 if self.isMaximized() else RADIUS
+        radius = 0 if self._square_corners() else RADIUS
         path = QPainterPath()
         path.addRoundedRect(rect, radius, radius)
 
@@ -190,7 +238,7 @@ class MainWindow(QWidget):
 
     def _edges_at(self, pos):
         edges = Qt.Edge(0)
-        if self.isMaximized():
+        if self._square_corners():
             return edges
         if pos.x() <= RESIZE_MARGIN:
             edges |= Qt.Edge.LeftEdge

@@ -18,6 +18,7 @@ RING = (13, 14, 15, 16)
 STRAIGHT = 0.85
 CURLED = 0.75
 DEBOUNCE_FRAMES = 3
+FAST_MOTION = 900
 
 
 @dataclass
@@ -109,13 +110,15 @@ class GestureReader:
 
             # em 3D a pose não depende da rotação da mão; sem 3D, usa o plano da imagem
             joints = hand.world if hand.world is not None else np.column_stack([points, np.zeros(21)])
-            index = _index_extended(joints, points)
-            pointing = self._debounce(hand.id, "pointing", index)
-            was_l = self._stable.get((hand.id, "l_shape"), (False, 0))[0]
-            l_shape = self._debounce(hand.id, "l_shape", _is_l_shape(joints, points, palm, index, was_l))
-
             velocity = self._velocity(hand.id, points[INDEX_TIP], timestamp)
             peak = self._peak(hand.id, velocity, timestamp)
+            # com a mão em movimento rápido o borrão engana a leitura, então o gesto fica como estava
+            frozen = float(np.linalg.norm(velocity)) > FAST_MOTION
+
+            index = _index_extended(joints, points)
+            pointing = self._debounce(hand.id, "pointing", index, frozen)
+            was_l = self._stable.get((hand.id, "l_shape"), (False, 0))[0]
+            l_shape = self._debounce(hand.id, "l_shape", _is_l_shape(joints, points, palm, index, was_l), frozen)
             poses.append(HandPose(hand.id, points, palm, pointing, l_shape, velocity, peak))
 
         seen = {pose.id for pose in poses}
@@ -124,10 +127,12 @@ class GestureReader:
         self._stable = {key: value for key, value in self._stable.items() if key[0] in seen}
         return poses
 
-    def _debounce(self, hand_id: int, name: str, value: bool) -> bool:
+    def _debounce(self, hand_id: int, name: str, value: bool, frozen: bool = False) -> bool:
         """Só troca o estado depois de alguns quadros seguidos discordando, para não piscar."""
         key = (hand_id, name)
         current, streak = self._stable.get(key, (value, 0))
+        if frozen and key in self._stable:
+            return current
         if value == current:
             streak = 0
         else:

@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# scripts de inicialização precisam do fim de linha do próprio sistema
+*.bat text eol=crlf
+*.command text eol=lf

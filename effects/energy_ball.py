@@ -1,8 +1,8 @@
 import math
 
 import numpy as np
-from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import QLineF, QPointF, Qt
+from PySide6.QtGui import QColor, QPainter, QPen, QStaticText
 
 from effects.base import Effect
 from effects.render import DEEP, ICE, WHITE, draw_glow, mono_font
@@ -19,7 +19,13 @@ FLIGHT_TIME = 0.4
 TRANSFER_COOLDOWN = 0.6
 BALL_FOLLOW = 22.0
 
+RELEASE_TIME = 0.7
+LINK_DISTANCE = 0.38
+LINKS_PER_POINT = 2
+LINK_LEVELS = 4
+
 EXPAND_SPEED = 5.0
+EXPAND_HOLD = 0.4
 EXPAND_MIN = 120
 EXPAND_MAX = 380
 DISK_TILT = 1.15
@@ -49,6 +55,7 @@ class EnergyBall(Effect):
     Peteleco na direção da outra mão lança a bola até ela.
     L com a outra mão abre a bola num disco de partículas; girar o L gira o disco
     e a distância entre as mãos define o tamanho.
+    Fechar a mão que segura a bola apaga a bola; apontar de novo acende.
     """
 
     name = "Bola de energia"
@@ -67,6 +74,7 @@ class EnergyBall(Effect):
 
         self._ball: np.ndarray | None = None
         self._visible = 0.0
+        self._release_clock = 0.0
 
         self._expand = 0.0
         self._expand_target = 0.0
@@ -75,10 +83,13 @@ class EnergyBall(Effect):
         self._rotation = 0.0
         self._rotation_target = 0.0
         self._grip: tuple[float, float] | None = None
+        self._frame_id: int | None = None
+        self._expand_hold = 0.0
 
         self._build_cloud()
         self._sparks = np.zeros((0, 5))
         self._label_clock = 0.0
+        self._text_cache: dict[str, QStaticText] = {}
 
     def _build_cloud(self):
         rng, n = self._rng, CLOUD_SIZE
@@ -167,12 +178,22 @@ class EnergyBall(Effect):
 
     def _read_expansion(self, owner: HandPose | None, poses: list[HandPose]):
         framing = [pose for pose in poses if owner is not None and pose.id != owner.id and pose.l_shape]
-        if not framing:
-            self._expand_target = 0.0
-            self._grip = None
+        if framing:
+            frame = framing[0]
+            self._frame_id = frame.id
+            self._expand_hold = EXPAND_HOLD
+        elif owner is not None and self._expand_hold > 0:
+            # o L falhou por um instante; enquanto a mesma mão estiver na tela, o disco continua aberto
+            frame = self._poses.get(self._frame_id)
+        else:
+            frame = None
+
+        if frame is None or owner is None:
+            if self._expand_hold <= 0:
+                self._expand_target = 0.0
+                self._grip = None
             return
 
-        frame = framing[0]
         spread = float(np.linalg.norm(frame.index_tip - owner.index_tip))
         self._radius_target = float(np.clip(spread * 0.55, EXPAND_MIN, EXPAND_MAX))
 
@@ -189,11 +210,25 @@ class EnergyBall(Effect):
     def _tip_anchor(pose: HandPose) -> np.ndarray:
         return pose.index_tip + pose.index_direction * pose.palm * 0.18
 
+    @property
+    def dim(self) -> float:
+        # a luz aditiva estoura em fundo claro, então o vídeo escurece conforme a bola acende
+        return self._visible
+
+    @property
+    def idle(self) -> bool:
+        return self._visible < 0.005 and not len(self._sparks) and self._owner is None and self._flight is None
+
     # animação
 
     def tick(self, dt: float):
         self._time += dt
         self._cooldown = max(0.0, self._cooldown - dt)
+        self._expand_hold = max(0.0, self._expand_hold - dt)
+        if self._expand_hold <= 0 and self._expand_target > 0 and self._owner is None:
+            self._expand_target = 0.0
+            self._grip = None
+        self._check_release(dt)
         previous = None if self._ball is None else self._ball.copy()
 
         self._move_ball(dt)
@@ -232,16 +267,40 @@ class EnergyBall(Effect):
                 self._owner = flight["target"]
                 self._flight = None
                 self._cooldown = TRANSFER_COOLDOWN
+                self._burst(self._ball, 26, 200)
             return
 
         owner = self._poses.get(self._owner)
         if owner is None:
             return
         anchor = self._tip_anchor(owner)
-        if self._ball is None:
+        if self._ball is None or self._visible < 0.05:
+            # acende direto no dedo, sem atravessar a tela vindo de onde apagou
             self._ball = anchor.copy()
+            self._particles = None
+            self._burst(anchor, 40, 260)
         else:
             self._ball += (anchor - self._ball) * (1 - math.exp(-dt * BALL_FOLLOW))
+
+    def _check_release(self, dt: float):
+        owner = self._poses.get(self._owner)
+        if owner is None or owner.pointing or self._expand_target > 0:
+            self._release_clock = 0.0
+            return
+        self._release_clock += dt
+        if self._release_clock >= RELEASE_TIME:
+            self._owner = None
+            self._release_clock = 0.0
+
+    def _burst(self, origin: np.ndarray, count: int, speed: float):
+        angle = self._rng.uniform(0, 2 * math.pi, count)
+        velocity = self._rng.uniform(0.3, 1.0, count) * speed
+        burst = np.zeros((count, 5))
+        burst[:, :2] = origin
+        burst[:, 2] = np.cos(angle) * velocity
+        burst[:, 3] = np.sin(angle) * velocity
+        burst[:, 4] = self._rng.uniform(0.35, 0.8, count)
+        self._sparks = np.vstack([self._sparks, burst])
 
     def _update_particles(self, dt: float):
         t, e = self._time, self._expand
@@ -310,11 +369,14 @@ class EnergyBall(Effect):
         strength = visible * twinkle * (0.45 + 0.55 * near)
         scale = 0.75 + 0.5 * near
         for (x, y), size, tint, power, grow in zip(self._particles, self._size, self._tint, strength, scale):
-            draw_glow(p, x, y, size * grow, power, TINTS[tint])
+            if power > 0.03:
+                draw_glow(p, x, y, size * grow, power, TINTS[tint])
 
         for x, y, _, _, life in self._sparks:
-            draw_glow(p, x, y, 3.5, visible * min(life * 2, 1.0) * 0.8)
+            draw_glow(p, x, y, 3.5, min(life * 2, 1.0) * 0.8)
 
+        if expand > 0.05:
+            self._draw_links(p, visible * expand)
         self._draw_labels(p, visible, expand, near)
 
         x, y = self._ball
@@ -324,8 +386,35 @@ class EnergyBall(Effect):
         draw_glow(p, x, y, 10, visible)
         p.restore()
 
+    def _draw_links(self, p: QPainter, strength: float):
+        """Liga cada partícula com número às vizinhas mais próximas, como uma rede de dados."""
+        points = self._particles[self._labeled]
+        limit = self._radius * LINK_DISTANCE
+        distance = np.linalg.norm(points[:, None, :] - points[None, :, :], axis=2)
+        np.fill_diagonal(distance, np.inf)
+        nearest = np.argsort(distance, axis=1)[:, :LINKS_PER_POINT]
+
+        # linhas agrupadas por transparência, desenhadas em lote
+        groups: list[list[QLineF]] = [[] for _ in range(LINK_LEVELS)]
+        seen = set()
+        for a, row in enumerate(nearest):
+            for b in row:
+                d = distance[a, b]
+                if d >= limit or (b, a) in seen:
+                    continue
+                seen.add((a, b))
+                level = min(int((1 - d / limit) * LINK_LEVELS), LINK_LEVELS - 1)
+                groups[level].append(QLineF(*points[a], *points[b]))
+
+        p.setPen(QPen(QColor(*ICE, 255), 0.8))
+        for level, lines in enumerate(groups):
+            if lines:
+                p.setOpacity(strength * 0.4 * (level + 1) / LINK_LEVELS)
+                p.drawLines(lines)
+
     def _draw_labels(self, p: QPainter, visible: float, expand: float, near: np.ndarray):
         p.setFont(mono_font(10))
+        p.setPen(QPen(QColor(220, 232, 255, 210), 1))
         for order, index in enumerate(self._labeled):
             strength = visible * (1.0 if order < COMPACT_LABELS else expand) * (0.35 + 0.65 * near[index])
             if strength < 0.03:
@@ -333,7 +422,17 @@ class EnergyBall(Effect):
             x, y = self._particles[index]
             size = float(self._size[index])
             p.setOpacity(strength * 0.85)
-            p.setPen(QPen(QColor(220, 232, 255, 210), 1))
             if size > 8:
                 p.drawEllipse(QPointF(x, y), size * 0.8, size * 0.8)
-            p.drawText(QPointF(x + size * 0.6 + 4, y + 3), self._labels[int(index)])
+            p.drawStaticText(QPointF(x + size * 0.6 + 4, y - 6), self._static_text(self._labels[int(index)]))
+
+    def _static_text(self, text: str) -> QStaticText:
+        # texto pré-calculado; refazer o layout de cada número a 60 fps pesa
+        cached = self._text_cache.get(text)
+        if cached is None:
+            cached = QStaticText(text)
+            cached.prepare(font=mono_font(10))
+            if len(self._text_cache) > 400:
+                self._text_cache.clear()
+            self._text_cache[text] = cached
+        return cached

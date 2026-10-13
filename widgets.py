@@ -1,8 +1,9 @@
 import time
+from functools import cache
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QByteArray, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QLineF, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -45,6 +46,19 @@ def round_pen(color: QColor, width: float) -> QPen:
     pen = QPen(color, width)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     return pen
+
+
+@cache
+def joint_halo(diameter: int) -> QImage:
+    image = QImage(diameter, diameter, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(0)
+    gradient = QRadialGradient(diameter / 2, diameter / 2, diameter / 2)
+    gradient.setColorAt(0, QColor(120, 170, 255, 170))
+    gradient.setColorAt(1, QColor(70, 130, 255, 0))
+    p = QPainter(image)
+    p.fillRect(image.rect(), gradient)
+    p.end()
+    return image
 
 
 def logo_mark(height: int) -> QPixmap:
@@ -243,6 +257,8 @@ class CameraView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._frame: QImage | None = None
+        self._scaled: QPixmap | None = None
+        self.radius = self.RADIUS
         self._hands: list[Hand] = []
         self._message = "Conectando câmera"
         self._toast = ""
@@ -264,14 +280,19 @@ class CameraView(QWidget):
 
     def set_frame(self, frame: QImage, hands: list[Hand]):
         self._frame = frame
+        self._scaled = None
         self._hands = hands
         poses = self._gestures.read(hands, frame.width(), frame.height(), time.perf_counter())
         self._gesture_labels = {pose.id: pose.label for pose in poses}
         if self.effect is not None:
+            if self.effect.wants_frame:
+                self.effect.set_frame(frame)
             self.effect.set_hands(poses)
         self.update()
 
     def set_effect(self, effect: Effect | None):
+        if self.effect is not None:
+            self.effect.close()
         self.effect = effect
         self.update()
 
@@ -282,7 +303,8 @@ class CameraView(QWidget):
         if self.effect is None or self.paused or self._frame is None:
             return
         self.effect.tick(dt)
-        self.update()
+        if not self.effect.idle:
+            self.update()
 
     def set_message(self, message: str):
         self._message = message
@@ -302,13 +324,37 @@ class CameraView(QWidget):
         image = self._frame.convertToFormat(QImage.Format.Format_RGB32)
         p = QPainter(image)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        if self.show_hands:
-            self._draw_hands(p, QRectF(image.rect()))
-        if self.effect is not None:
-            p.fillRect(image.rect(), QColor(0, 0, 10, EFFECT_DIM))
-            self.effect.draw(p)
+        self._draw_overlay(p, QRectF(image.rect()))
         p.end()
         return image
+
+    def _draw_overlay(self, p: QPainter, rect: QRectF):
+        """Escurecimento, mãos e efeito, nessa ordem, sobre o vídeo já desenhado em rect."""
+        if self.effect is not None:
+            dim = round(EFFECT_DIM * self.effect.dim)
+            if dim > 0:
+                p.fillRect(rect, QColor(0, 0, 10, dim))
+        if self.show_hands:
+            self._draw_hands(p, rect)
+        if self.effect is not None:
+            p.save()
+            p.translate(rect.topLeft())
+            scale = rect.width() / self._frame.width()
+            p.scale(scale, scale)
+            self.effect.draw(p)
+            p.restore()
+
+    def _scaled_frame(self, rect: QRectF) -> QPixmap:
+        # o quadro só muda ~25 vezes por segundo, mas a tela repinta a 60;
+        # escalar uma vez por quadro evita refazer o trabalho mais pesado da pintura
+        ratio = self.devicePixelRatioF()
+        size = QSize(round(rect.width() * ratio), round(rect.height() * ratio))
+        if self._scaled is None or self._scaled.size() != size:
+            self._scaled = QPixmap.fromImage(self._frame).scaled(
+                size, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation
+            )
+            self._scaled.setDevicePixelRatio(ratio)
+        return self._scaled
 
     def _image_rect(self, rect: QRectF) -> QRectF:
         scale = max(rect.width() / self._frame.width(), rect.height() / self._frame.height())
@@ -323,7 +369,7 @@ class CameraView(QWidget):
 
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         path = QPainterPath()
-        path.addRoundedRect(rect, self.RADIUS, self.RADIUS)
+        path.addRoundedRect(rect, self.radius, self.radius)
 
         p.save()
         p.setClipPath(path)
@@ -336,18 +382,8 @@ class CameraView(QWidget):
             p.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._message)
         else:
             image_rect = self._image_rect(rect)
-            p.drawImage(image_rect, self._frame)
-            if self.show_hands:
-                self._draw_hands(p, image_rect)
-            if self.effect is not None:
-                # escurece o vídeo para a luz aditiva dos efeitos não estourar em fundo claro
-                p.fillRect(image_rect, QColor(0, 0, 10, EFFECT_DIM))
-                p.save()
-                p.translate(image_rect.topLeft())
-                scale = image_rect.width() / self._frame.width()
-                p.scale(scale, scale)
-                self.effect.draw(p)
-                p.restore()
+            p.drawPixmap(image_rect.topLeft(), self._scaled_frame(image_rect))
+            self._draw_overlay(p, image_rect)
         p.restore()
 
         p.setBrush(Qt.BrushStyle.NoBrush)
@@ -378,21 +414,19 @@ class CameraView(QWidget):
 
         for hand in self._hands:
             points = [QPointF(rect.x() + x * rect.width(), rect.y() + y * rect.height()) for x, y in hand.points]
+            lines = [QLineF(points[start], points[end]) for start, end in HAND_CONNECTIONS]
 
             for pen in (glow_pen, core_pen):
                 p.setPen(pen)
-                for start, end in HAND_CONNECTIONS:
-                    p.drawLine(points[start], points[end])
+                p.drawLines(lines)
+
+            for index, point in enumerate(points):
+                halo = joint_halo(18 if index in FINGERTIPS else 12)
+                p.drawImage(QPointF(point.x() - halo.width() / 2, point.y() - halo.height() / 2), halo)
 
             p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(255, 255, 255))
             for index, point in enumerate(points):
-                halo = 9 if index in FINGERTIPS else 6
-                gradient = QRadialGradient(point, halo)
-                gradient.setColorAt(0, QColor(120, 170, 255, 170))
-                gradient.setColorAt(1, QColor(70, 130, 255, 0))
-                p.setBrush(gradient)
-                p.drawEllipse(point, halo, halo)
-                p.setBrush(QColor(255, 255, 255))
                 core = 2.8 if index in FINGERTIPS else 2.0
                 p.drawEllipse(point, core, core)
 

@@ -28,8 +28,10 @@ def glow_sprite(tint: tuple[int, int, int] = WHITE, size: int = 64) -> QImage:
 
 
 def draw_glow(p: QPainter, x: float, y: float, radius: float, opacity: float, tint=WHITE):
+    # sprite já no tamanho certo: copiar é bem mais barato que redimensionar a cada partícula
+    diameter = max(2, round(radius * 2))
     p.setOpacity(max(0.0, min(opacity, 1.0)))
-    p.drawImage(QRectF(x - radius, y - radius, radius * 2, radius * 2), glow_sprite(tint))
+    p.drawImage(QPointF(x - diameter / 2, y - diameter / 2), glow_sprite(tint, diameter))
 
 
 @cache
