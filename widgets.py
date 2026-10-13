@@ -1,30 +1,39 @@
-from PySide6.QtCore import QByteArray, QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient
+from pathlib import Path
+
+import numpy as np
+from PySide6.QtCore import QByteArray, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QGuiApplication,
+    QImage,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QRadialGradient,
+)
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QAbstractButton, QHBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractButton, QHBoxLayout, QLabel, QWidget
 
 from tracker import FINGERTIPS, HAND_CONNECTIONS, Hand
 
-ACCENT = QColor(64, 120, 255)
+LOGO = Path(__file__).resolve().parent / "logo.png"
 
 # Ícones no estilo Lucide, desenhados com traço branco
 ICONS = {
     "hand": '<path d="M18 11V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2"/><path d="M14 10V4a2 2 0 0 0-2-2a2 2 0 0 0-2 2v2"/>'
             '<path d="M10 10.5V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2v8"/>'
             '<path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/>',
-    "wave": '<path d="M2 12c2.5-5 7.5-5 10 0s7.5 5 10 0"/>',
-    "target": '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3" fill="white"/>',
-    "flame": '<path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 '
-             '2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>',
-    "snowflake": '<path d="M2 12h20"/><path d="M12 2v20"/><path d="m20 16-4-4 4-4"/><path d="m4 8 4 4-4 4"/>'
-                 '<path d="m16 4-4 4-4-4"/><path d="m8 20 4-4 4 4"/>',
-    "settings": '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73'
-                'l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73'
-                'l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2'
-                'v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73'
-                'l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73'
-                'l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
-    "info": '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+    "mirror": '<path d="M8 3H5a2 2 0 0 0-2 2v14c0 1.1.9 2 2 2h3"/><path d="M16 3h3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-3"/>'
+              '<path d="M12 20v2"/><path d="M12 14v2"/><path d="M12 8v2"/><path d="M12 2v2"/>',
+    "switch": '<path d="M11 19H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"/><path d="M13 5h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-5"/>'
+              '<circle cx="12" cy="12" r="3"/><path d="m18 22-3-3 3-3"/><path d="m6 2 3 3-3 3"/>',
+    "pause": '<rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/>',
+    "play": '<path d="M6 3l14 9-14 9z"/>',
+    "photo": '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/>'
+             '<circle cx="12" cy="13" r="3"/>',
 }
 
 
@@ -32,6 +41,32 @@ def round_pen(color: QColor, width: float) -> QPen:
     pen = QPen(color, width)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     return pen
+
+
+def logo_mark(height: int) -> QPixmap:
+    """Recorta só a mão do logo, sem o texto e sem a borda transparente."""
+    image = QImage(str(LOGO)).convertToFormat(QImage.Format.Format_RGBA8888)
+    data = np.frombuffer(image.constBits(), np.uint8).reshape(image.height(), image.bytesPerLine())
+    alpha = data[:, : image.width() * 4].reshape(image.height(), image.width(), 4)[:, :, 3] > 40
+
+    rows = np.nonzero(alpha.any(axis=1))[0]
+    gaps = np.nonzero(np.diff(rows) > 1)[0]
+    top, bottom = rows[0], rows[gaps[0]] if len(gaps) else rows[-1]
+    cols = np.nonzero(alpha[top:bottom + 1].any(axis=0))[0]
+
+    pad = 12
+    left = max(cols[0] - pad, 0)
+    top = max(top - pad, 0)
+    right = min(cols[-1] + pad, image.width() - 1)
+    bottom = min(bottom + pad, image.height() - 1)
+    cropped = image.copy(int(left), int(top), int(right - left + 1), int(bottom - top + 1))
+
+    ratio = QGuiApplication.primaryScreen().devicePixelRatio()
+    pixmap = QPixmap.fromImage(cropped).scaledToHeight(
+        round(height * ratio), Qt.TransformationMode.SmoothTransformation
+    )
+    pixmap.setDevicePixelRatio(ratio)
+    return pixmap
 
 
 def icon_renderer(name: str) -> QSvgRenderer:
@@ -53,6 +88,10 @@ class SideButton(QAbstractButton):
         self.setToolTip(tooltip)
         self.setFixedSize(self.SIZE + 16, self.SIZE + 16)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_icon(self, icon: str):
+        self._renderer = icon_renderer(icon)
+        self.update()
 
     def enterEvent(self, event):
         self._hover = True
@@ -82,7 +121,7 @@ class SideButton(QAbstractButton):
             p.setBrush(fill)
             p.setPen(QPen(QColor(170, 200, 255, 220), 1.5))
         else:
-            alpha = 30 if self._hover else 16
+            alpha = 46 if self.isDown() else 30 if self._hover else 16
             p.setBrush(QColor(255, 255, 255, alpha))
             p.setPen(QPen(QColor(255, 255, 255, 40), 1))
         p.drawEllipse(center, r - 0.5, r - 0.5)
@@ -154,7 +193,18 @@ class TitleBar(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(52)
+        self.setFixedHeight(60)
+
+        mark = QLabel(self)
+        mark.setPixmap(logo_mark(30))
+        name = QLabel("Handwave", self)
+        font = name.font()
+        font.setPointSizeF(11.5)
+        font.setWeight(QFont.Weight.DemiBold)
+        name.setFont(font)
+        name.setStyleSheet("color: rgba(255, 255, 255, 0.9);")
+        for label in (mark, name):
+            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
         self.minimize_button = WindowButton("minimize")
         self.zoom_button = WindowButton("maximize")
@@ -164,8 +214,11 @@ class TitleBar(QWidget):
         self.close_button.clicked.connect(self.close_clicked)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 14, 0)
+        layout.setContentsMargins(36, 0, 14, 0)
         layout.setSpacing(4)
+        layout.addWidget(mark)
+        layout.addSpacing(6)
+        layout.addWidget(name)
         layout.addStretch()
         layout.addWidget(self.minimize_button)
         layout.addWidget(self.zoom_button)
@@ -187,6 +240,11 @@ class CameraView(QWidget):
         self._frame: QImage | None = None
         self._hands: list[Hand] = []
         self._message = "Conectando câmera"
+        self._toast = ""
+        self._toast_timer = QTimer(self, singleShot=True, interval=2200)
+        self._toast_timer.timeout.connect(lambda: self.show_toast(""))
+        self.show_hands = True
+        self.paused = False
         self.setMinimumSize(480, 320)
 
     def sizeHint(self):
@@ -202,6 +260,23 @@ class CameraView(QWidget):
         self._frame = None
         self._hands = []
         self.update()
+
+    def show_toast(self, text: str):
+        self._toast = text
+        if text:
+            self._toast_timer.start()
+        self.update()
+
+    def snapshot(self) -> QImage | None:
+        if self._frame is None:
+            return None
+        image = self._frame.convertToFormat(QImage.Format.Format_RGB32)
+        p = QPainter(image)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self.show_hands:
+            self._draw_hands(p, QRectF(image.rect()))
+        p.end()
+        return image
 
     def _image_rect(self, rect: QRectF) -> QRectF:
         scale = max(rect.width() / self._frame.width(), rect.height() / self._frame.height())
@@ -230,12 +305,31 @@ class CameraView(QWidget):
         else:
             image_rect = self._image_rect(rect)
             p.drawImage(image_rect, self._frame)
-            self._draw_hands(p, image_rect)
+            if self.show_hands:
+                self._draw_hands(p, image_rect)
         p.restore()
 
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(QPen(QColor(255, 255, 255, 46), 1))
         p.drawPath(path)
+
+        if self.paused and self._frame is not None:
+            self._draw_pill(p, "Pausado", rect.top() + 18)
+        if self._toast:
+            self._draw_pill(p, self._toast, rect.bottom() - 18 - 34)
+
+    def _draw_pill(self, p: QPainter, text: str, y: float):
+        font = self.font()
+        font.setPointSizeF(10)
+        font.setWeight(QFont.Weight.Medium)
+        p.setFont(font)
+        width = p.fontMetrics().horizontalAdvance(text) + 36
+        pill = QRectF(self.width() / 2 - width / 2, y, width, 34)
+        p.setPen(QPen(QColor(255, 255, 255, 50), 1))
+        p.setBrush(QColor(14, 18, 40, 190))
+        p.drawRoundedRect(pill, 17, 17)
+        p.setPen(QColor(255, 255, 255, 230))
+        p.drawText(pill, Qt.AlignmentFlag.AlignCenter, text)
 
     def _draw_hands(self, p: QPainter, rect: QRectF):
         glow_pen = round_pen(QColor(70, 130, 255, 70), 7)

@@ -1,6 +1,9 @@
-from PySide6.QtCore import QRectF, Qt
+from datetime import datetime
+from pathlib import Path
+
+from PySide6.QtCore import QRectF, QStandardPaths, Qt
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QButtonGroup, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from blur import enable_blur, set_round_region
 from camera import CameraWorker
@@ -8,14 +11,6 @@ from widgets import CameraView, Separator, SideButton, TitleBar
 
 RADIUS = 26
 RESIZE_MARGIN = 6
-
-MODES = [
-    ("hand", "Mãos"),
-    ("wave", "Ondas"),
-    ("target", "Foco"),
-    ("flame", "Fogo"),
-    ("snowflake", "Gelo"),
-]
 
 
 class MainWindow(QWidget):
@@ -30,34 +25,42 @@ class MainWindow(QWidget):
 
         self._hwnd = int(self.winId())
         self._blurred = enable_blur(self._hwnd)
-        self.mode = MODES[0][0]
 
         self.title_bar = TitleBar(self)
         self.title_bar.close_clicked.connect(self.close)
         self.title_bar.minimize_clicked.connect(self.showMinimized)
         self.title_bar.zoom_clicked.connect(self._toggle_zoom)
 
+        self.camera_view = CameraView(self)
+
+        self.hands_button = SideButton("hand", "Mostrar mãos")
+        self.hands_button.setChecked(True)
+        self.hands_button.toggled.connect(self._set_show_hands)
+
+        self.mirror_button = SideButton("mirror", "Espelhar imagem")
+        self.mirror_button.setChecked(True)
+        self.mirror_button.toggled.connect(self._set_mirror)
+
+        self.switch_button = SideButton("switch", "Trocar câmera", checkable=False)
+        self.switch_button.clicked.connect(self._switch_camera)
+
+        self.pause_button = SideButton("pause", "Pausar")
+        self.pause_button.toggled.connect(self._set_paused)
+
+        self.photo_button = SideButton("photo", "Salvar foto", checkable=False)
+        self.photo_button.clicked.connect(self._save_photo)
+
         sidebar = QVBoxLayout()
         sidebar.setContentsMargins(0, 0, 0, 0)
         sidebar.setSpacing(4)
-        self.mode_group = QButtonGroup(self)
-        self.mode_group.setExclusive(True)
-        for key, label in MODES:
-            button = SideButton(key, label)
-            button.setProperty("mode", key)
-            self.mode_group.addButton(button)
-            sidebar.addWidget(button)
-        self.mode_group.buttons()[0].setChecked(True)
-        self.mode_group.buttonClicked.connect(lambda b: setattr(self, "mode", b.property("mode")))
-
-        sidebar.addWidget(Separator())
-        self.settings_button = SideButton("settings", "Configurações", checkable=False)
-        self.info_button = SideButton("info", "Sobre", checkable=False)
-        sidebar.addWidget(self.settings_button)
-        sidebar.addWidget(self.info_button)
         sidebar.addStretch()
-
-        self.camera_view = CameraView(self)
+        sidebar.addWidget(self.hands_button)
+        sidebar.addWidget(self.mirror_button)
+        sidebar.addWidget(Separator())
+        sidebar.addWidget(self.switch_button)
+        sidebar.addWidget(self.pause_button)
+        sidebar.addWidget(self.photo_button)
+        sidebar.addStretch()
 
         body = QHBoxLayout()
         body.setContentsMargins(26, 0, 40, 40)
@@ -74,6 +77,7 @@ class MainWindow(QWidget):
         self.worker = CameraWorker()
         self.worker.frame_ready.connect(self._on_frame)
         self.worker.status_changed.connect(self._on_status)
+        self.worker.notice.connect(self.camera_view.show_toast)
         self.worker.start()
 
     def _on_frame(self, frame, hands, fps):
@@ -82,6 +86,40 @@ class MainWindow(QWidget):
     def _on_status(self, state, text):
         if state != "live":
             self.camera_view.set_message(text)
+
+    def _set_show_hands(self, visible):
+        self.camera_view.show_hands = visible
+        self.hands_button.setToolTip("Ocultar mãos" if visible else "Mostrar mãos")
+        self.camera_view.update()
+
+    def _set_mirror(self, mirror):
+        self.worker.mirror = mirror
+
+    def _set_paused(self, paused):
+        self.worker.paused = paused
+        self.camera_view.paused = paused
+        self.pause_button.set_icon("play" if paused else "pause")
+        self.pause_button.setToolTip("Continuar" if paused else "Pausar")
+        self.camera_view.update()
+
+    def _switch_camera(self):
+        if self.pause_button.isChecked():
+            self.pause_button.setChecked(False)
+        self.camera_view.set_message("Trocando câmera")
+        self.worker.switch_camera()
+
+    def _save_photo(self):
+        image = self.camera_view.snapshot()
+        if image is None:
+            self.camera_view.show_toast("Nenhuma imagem para salvar")
+            return
+        folder = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation)) / "Handwave"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"handwave_{datetime.now():%Y%m%d_%H%M%S}.png"
+        if image.save(str(path)):
+            self.camera_view.show_toast("Foto salva em Imagens/Handwave")
+        else:
+            self.camera_view.show_toast("Não foi possível salvar a foto")
 
     def _toggle_zoom(self):
         if self.isMaximized():

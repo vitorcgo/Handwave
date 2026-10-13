@@ -19,10 +19,18 @@ else:
 class CameraWorker(QThread):
     frame_ready = Signal(QImage, list, float)
     status_changed = Signal(str, str)
+    notice = Signal(str)
 
     def __init__(self, max_index: int = 4, parent=None):
         super().__init__(parent)
         self._max_index = max_index
+        self._index: int | None = None
+        self._switch_requested = False
+        self.mirror = True
+        self.paused = False
+
+    def switch_camera(self):
+        self._switch_requested = True
 
     def run(self):
         self.status_changed.emit("loading", "Preparando rastreamento")
@@ -34,19 +42,33 @@ class CameraWorker(QThread):
 
         try:
             while not self.isInterruptionRequested():
-                capture = self._open_camera()
+                switching = self._switch_requested
+                self._switch_requested = False
+                previous = self._index
+
+                capture = self._open_camera(skip_current=switching)
                 if capture is None:
                     self.status_changed.emit("searching", "Procurando câmera")
                     self.msleep(1500)
                     continue
+                if switching and self._index == previous:
+                    self.notice.emit("Nenhuma outra câmera encontrada")
+                elif switching:
+                    self.notice.emit(f"Câmera {self._index + 1}")
+
                 self.status_changed.emit("live", "Câmera conectada")
                 self._stream(capture, tracker)
                 capture.release()
         finally:
             tracker.close()
 
-    def _open_camera(self):
-        for index in range(self._max_index):
+    def _open_camera(self, skip_current: bool):
+        order = list(range(self._max_index))
+        if self._index is not None:
+            start = self._index + 1 if skip_current else self._index
+            order = order[start % self._max_index:] + order[:start % self._max_index]
+
+        for index in order:
             capture = cv2.VideoCapture(index, BACKEND)
             if not capture.isOpened():
                 capture.release()
@@ -55,6 +77,7 @@ class CameraWorker(QThread):
             capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
             ok, _ = capture.read()
             if ok:
+                self._index = index
                 return capture
             capture.release()
         return None
@@ -64,7 +87,7 @@ class CameraWorker(QThread):
         last = time.perf_counter()
         fps = 0.0
 
-        while not self.isInterruptionRequested():
+        while not self.isInterruptionRequested() and not self._switch_requested:
             ok, frame = capture.read()
             if not ok:
                 failures += 1
@@ -74,7 +97,12 @@ class CameraWorker(QThread):
                 continue
             failures = 0
 
-            frame = cv2.flip(frame, 1)
+            # a leitura continua durante a pausa para não acumular quadros velhos
+            if self.paused:
+                continue
+
+            if self.mirror:
+                frame = cv2.flip(frame, 1)
             height, width = frame.shape[:2]
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 

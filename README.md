@@ -45,9 +45,9 @@ O Handwave transforma a webcam em uma superfície de interação. Assim que o ap
 | | Destaque | Detalhe |
 |:-:|---|---|
 | <img src="https://api.iconify.design/lucide/camera.svg?color=%234078ff" width="22"> | Câmera automática | Testa os dispositivos disponíveis e reconecta sozinho se a câmera cair |
-| <img src="https://api.iconify.design/lucide/hand.svg?color=%234078ff" width="22"> | Rastreamento de mãos | Até duas mãos ao mesmo tempo, com suavização para reduzir tremidas |
+| <img src="https://api.iconify.design/lucide/hand.svg?color=%234078ff" width="22"> | Rastreamento de mãos | Até duas mãos ao mesmo tempo, com filtro One Euro contra tremidas |
 | <img src="https://api.iconify.design/lucide/layers.svg?color=%234078ff" width="22"> | Interface de vidro | Desfoque acrylic nativo do Windows, cantos arredondados e brilho azul |
-| <img src="https://api.iconify.design/lucide/gauge.svg?color=%234078ff" width="22"> | Tempo real | Captura e inferência rodam fora da thread da interface, a 30 fps |
+| <img src="https://api.iconify.design/lucide/gauge.svg?color=%234078ff" width="22"> | Tempo real | Captura e inferência rodam fora da thread da interface, até 30 fps |
 
 ---
 
@@ -56,9 +56,9 @@ O Handwave transforma a webcam em uma superfície de interação. Assim que o ap
 - **Conexão automática** com a primeira câmera que responder, sem configuração
 - **Reconexão** quando a câmera é desconectada ou para de enviar quadros
 - **Rastreamento de 21 pontos** por mão usando o MediaPipe Hand Landmarker
-- **Imagem espelhada**, para que o movimento na tela acompanhe o seu
+- **Pontos estáveis** mesmo com a mão inclinada, graças à imagem quadrada enviada ao modelo
 - **Esqueleto com brilho** desenhado em vetor, nítido em qualquer resolução
-- **Barra lateral de modos** pronta para receber os efeitos visuais
+- **Controles na barra lateral** para mostrar as mãos, espelhar, trocar de câmera, pausar e salvar foto
 - **Janela sem moldura** com arrastar, redimensionar pelas bordas e maximizar
 - **Download automático do modelo** na primeira execução
 
@@ -141,7 +141,7 @@ flowchart TB
 | Módulo | Responsabilidade |
 |---|---|
 | `main.py` | Cria a aplicação Qt, define fonte, ícone e abre a janela |
-| `window.py` | Janela principal, barra lateral de modos, redimensionamento e ciclo de vida da câmera |
+| `window.py` | Janela principal, ações da barra lateral, redimensionamento e ciclo de vida da câmera |
 | `widgets.py` | Componentes visuais: vídeo com esqueleto das mãos, botões e barra de título |
 | `camera.py` | Thread que encontra a câmera, captura quadros e chama o rastreador |
 | `tracker.py` | Envolve o MediaPipe, baixa o modelo e suaviza os pontos |
@@ -208,7 +208,16 @@ flowchart LR
 | Mover a janela | Arraste pela faixa superior |
 | Redimensionar | Arraste qualquer borda |
 | Maximizar | Botão no canto superior direito ou duplo clique na faixa superior |
-| Trocar de modo | Clique nos botões da barra lateral |
+
+### Barra lateral
+
+| | Botão | Função |
+|:-:|---|---|
+| <img src="https://api.iconify.design/lucide/hand.svg?color=%234078ff" width="20"> | Mãos | Mostra ou oculta o esqueleto das mãos |
+| <img src="https://api.iconify.design/lucide/flip-horizontal.svg?color=%234078ff" width="20"> | Espelhar | Inverte a imagem horizontalmente |
+| <img src="https://api.iconify.design/lucide/switch-camera.svg?color=%234078ff" width="20"> | Trocar câmera | Passa para a próxima câmera conectada |
+| <img src="https://api.iconify.design/lucide/pause.svg?color=%234078ff" width="20"> | Pausar | Congela a imagem até clicar de novo |
+| <img src="https://api.iconify.design/lucide/camera.svg?color=%234078ff" width="20"> | Foto | Salva o quadro com as mãos desenhadas em Imagens/Handwave |
 
 ---
 
@@ -238,7 +247,8 @@ A interface segue a linguagem de vidro do macOS, adaptada a um tema escuro e azu
 | Fundo da janela | Acrylic nativo com tinta azul translúcida e borda clara de 1 px |
 | Cantos | Raio de 26 px na janela e 20 px na área da câmera |
 | Cor de destaque | `#4078FF` |
-| Botões laterais | Círculos de vidro, com o modo ativo preenchido em azul e com brilho |
+| Botões laterais | Círculos de vidro centralizados na vertical; quando ligados, ficam preenchidos em azul e com brilho |
+| Logo | Só a mão do logo, recortada automaticamente, ao lado do nome no topo da janela |
 | Mãos | Linhas finas azul claro com halo, pontos brancos e pontas dos dedos maiores |
 | Tipografia | SF Pro no macOS e Segoe UI Variable no Windows |
 
@@ -270,7 +280,8 @@ flowchart LR
 
 - [x] Conexão automática com a câmera
 - [x] Rastreamento de até duas mãos
-- [x] Interface de vidro com barra lateral de modos
+- [x] Interface de vidro com controles na barra lateral
+- [x] Mostrar mãos, espelhar, trocar câmera, pausar e salvar foto
 - [ ] **Energia:** partículas e um núcleo de luz que se formam entre as duas mãos e reagem à distância entre elas
 - [ ] **Ondas:** rastros suaves que seguem as pontas dos dedos
 - [ ] **Foco:** um anel que acompanha a pinça entre polegar e indicador
