@@ -175,7 +175,7 @@ flowchart LR
 
 ### Bola de energia
 
-<img src="https://api.iconify.design/lucide/orbit.svg?color=%234078ff" width="20"> Um orbe de luz com partículas e números em estilo ASCII, inspirado em efeitos feitos no TouchDesigner.
+<img src="https://api.iconify.design/lucide/orbit.svg?color=%234078ff" width="20"> Um orbe de luz com partículas e números em estilo ASCII, inspirado em efeitos feitos no TouchDesigner. Cada partícula tem uma órbita própria em 3D: fechada, a bola é uma esfera; aberta, vira um disco inclinado em que as partículas de dentro giram mais rápido, e as mais próximas da câmera brilham mais.
 
 ```mermaid
 stateDiagram-v2
@@ -191,8 +191,10 @@ stateDiagram-v2
 |---|---|
 | Apontar com o indicador | A bola aparece e acompanha a ponta do dedo |
 | Peteleco rápido na direção da outra mão | A bola voa em arco até o outro indicador, deixando rastro |
-| L com a outra mão | A bola se abre numa nuvem com anel elíptico ao longo do dedo que a segura; quanto mais longe a mão do L, maior a nuvem |
-| Desfazer o L | A nuvem se recolhe de volta para a bola |
+| L com a outra mão | A bola se abre num disco de partículas em perspectiva, centrado no dedo que a segura; quanto mais longe a mão do L, maior o disco |
+| Girar a mão do L | O disco gira junto, como um botão giratório |
+| Mover a mão que segura | O disco acompanha o dedo |
+| Desfazer o L | O disco se recolhe de volta para a bola |
 
 ### Criando um efeito novo
 

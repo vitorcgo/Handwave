@@ -5,35 +5,50 @@ from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen
 
 from effects.base import Effect
-from effects.render import draw_glow, mono_font, point
+from effects.render import DEEP, ICE, WHITE, draw_glow, mono_font
 from gestures import HandPose
 
-CLOUD_SIZE = 240
-LABELED_RATIO = 0.25
-COMPACT_LABELS = 7
+CLOUD_SIZE = 360
+LABELED_RATIO = 0.12
+COMPACT_LABELS = 6
+COMPACT_RADIUS = 30
 
 FLICK_SPEED = 700
 FLICK_ALIGNMENT = 0.35
 FLIGHT_TIME = 0.4
 TRANSFER_COOLDOWN = 0.6
 BALL_FOLLOW = 22.0
-EXPAND_SPEED = 5.0
-EXPAND_MIN = 110
-EXPAND_MAX = 320
 
+EXPAND_SPEED = 5.0
+EXPAND_MIN = 120
+EXPAND_MAX = 380
+DISK_TILT = 1.15
+ROTATION_GAIN = 1.6
+
+TINTS = (WHITE, ICE, DEEP)
 ASCII = list("+*:.=#%-~<>|")
 
 
-def _rotate(vectors: np.ndarray, radians: float) -> np.ndarray:
-    c, s = math.cos(radians), math.sin(radians)
-    return vectors @ np.array([[c, s], [-s, c]])
+def _wrap(angle: float) -> float:
+    return (angle + math.pi) % (2 * math.pi) - math.pi
+
+
+def _orbit(radius, theta, height, tilt, node):
+    """Posição 3D de cada partícula na sua órbita, já girada pelo plano da órbita."""
+    x = radius * np.cos(theta)
+    y = radius * np.sin(theta)
+    z = height
+    y, z = y * np.cos(tilt) - z * np.sin(tilt), y * np.sin(tilt) + z * np.cos(tilt)
+    x, y = x * np.cos(node) - y * np.sin(node), x * np.sin(node) + y * np.cos(node)
+    return np.stack([x, y], axis=1), z
 
 
 class EnergyBall(Effect):
-    """Orbe de luz na ponta do indicador.
+    """Orbe de partículas na ponta do indicador.
 
     Peteleco na direção da outra mão lança a bola até ela.
-    L com a outra mão abre a bola numa nuvem com um anel ao longo do dedo que a segura.
+    L com a outra mão abre a bola num disco de partículas; girar o L gira o disco
+    e a distância entre as mãos define o tamanho.
     """
 
     name = "Bola de energia"
@@ -51,15 +66,15 @@ class EnergyBall(Effect):
         self._time = 0.0
 
         self._ball: np.ndarray | None = None
-        self._core: np.ndarray | None = None
         self._visible = 0.0
 
         self._expand = 0.0
         self._expand_target = 0.0
-        self._frame_target: tuple[np.ndarray, np.ndarray, float] | None = None
-        self._center: np.ndarray | None = None
-        self._axes = np.array([1.0, 1.0])
-        self._angle = 0.0
+        self._radius = float(EXPAND_MIN)
+        self._radius_target = float(EXPAND_MIN)
+        self._rotation = 0.0
+        self._rotation_target = 0.0
+        self._grip: tuple[float, float] | None = None
 
         self._build_cloud()
         self._sparks = np.zeros((0, 5))
@@ -67,17 +82,32 @@ class EnergyBall(Effect):
 
     def _build_cloud(self):
         rng, n = self._rng, CLOUD_SIZE
-        self._compact = rng.normal(0, 1, (n, 2)) * 16
-        radius = np.sqrt(rng.uniform(0.05, 1, n)) * rng.uniform(0.7, 1.45, n)
-        angle = rng.uniform(0, 2 * math.pi, n)
-        self._spread = np.stack([np.cos(angle) * radius, np.sin(angle) * radius], axis=1)
-        self._stiffness = rng.uniform(5, 14, n)[:, None]
+        dust = rng.random(n) < 0.15
+        self._r = np.where(dust, rng.uniform(1.0, 1.5, n), 0.1 + 0.9 * rng.random(n) ** 1.6)
+        self._theta = rng.uniform(0, 2 * math.pi, n)
+        self._height = rng.normal(0, 0.06, n)
+
+        # fechada: órbitas em planos aleatórios formam uma esfera
+        self._spin_compact = rng.choice([-1, 1], n) * rng.uniform(1.5, 3.0, n)
+        self._tilt_compact = np.arccos(rng.uniform(-1, 1, n))
+        self._node_compact = rng.uniform(0, 2 * math.pi, n)
+        # aberta: todas no mesmo disco, as de dentro girando mais rápido
+        self._spin_disk = 0.35 + 0.6 / (self._r + 0.3)
+
+        self._stiffness = rng.uniform(12, 26, n)[:, None]
         self._phase = rng.uniform(0, 2 * math.pi, n)
-        big = rng.random(n) < 0.12
-        self._size = np.where(big, rng.uniform(9, 15, n), rng.uniform(2.5, 6, n))
-        self._labeled = np.nonzero(rng.random(n) < LABELED_RATIO)[0]
+        kind = rng.random(n)
+        self._size = np.select(
+            [kind < 0.70, kind < 0.94], [rng.uniform(1.8, 3.5, n), rng.uniform(4, 7, n)], rng.uniform(9, 14, n)
+        )
+        self._tint = rng.choice(len(TINTS), n, p=[0.55, 0.3, 0.15])
+
+        candidates = np.nonzero(self._size > 4)[0]
+        count = max(int(n * LABELED_RATIO), 1)
+        self._labeled = rng.choice(candidates, size=min(count, len(candidates)), replace=False)
         self._labels = {int(i): self._random_label() for i in self._labeled}
         self._particles: np.ndarray | None = None
+        self._depth = np.zeros(n)
 
     def _random_label(self) -> str:
         r = self._rng
@@ -115,7 +145,7 @@ class EnergyBall(Effect):
         owner = self._poses.get(self._owner)
         if owner is not None:
             self._check_flick(owner)
-        self._read_frame_gesture(poses)
+        self._read_expansion(owner, poses)
 
     def _check_flick(self, owner: HandPose):
         if self._flight or self._cooldown > 0 or self._expand > 0.3 or self._ball is None:
@@ -135,22 +165,24 @@ class EnergyBall(Effect):
         self._flight = {"start": self._ball.copy(), "target": target.id, "t": 0.0}
         self._owner = None
 
-    def _read_frame_gesture(self, poses: list[HandPose]):
-        owner = self._poses.get(self._owner)
+    def _read_expansion(self, owner: HandPose | None, poses: list[HandPose]):
         framing = [pose for pose in poses if owner is not None and pose.id != owner.id and pose.l_shape]
         if not framing:
             self._expand_target = 0.0
+            self._grip = None
             return
 
-        # a nuvem cresce ao longo do dedo que segura a bola, com o tamanho pela distância entre as mãos
         frame = framing[0]
         spread = float(np.linalg.norm(frame.index_tip - owner.index_tip))
-        length = float(np.clip(spread * 0.45, EXPAND_MIN, EXPAND_MAX))
-        direction = owner.index_direction
-        center = owner.index_tip + direction * length * 0.75
-        angle = math.atan2(direction[1], direction[0]) - math.pi / 2
-        angle = (angle + math.pi / 2) % math.pi - math.pi / 2
-        self._frame_target = (center, np.array([length * 0.55, length]), angle)
+        self._radius_target = float(np.clip(spread * 0.55, EXPAND_MIN, EXPAND_MAX))
+
+        # a mão do L funciona como um botão giratório: o quanto ela gira desde que o L começou
+        direction = frame.index_direction
+        angle = math.atan2(direction[1], direction[0])
+        if self._grip is None:
+            self._grip = (angle, self._rotation_target)
+        start_angle, start_rotation = self._grip
+        self._rotation_target = start_rotation + _wrap(angle - start_angle) * ROTATION_GAIN
         self._expand_target = 1.0
 
     @staticmethod
@@ -173,7 +205,12 @@ class EnergyBall(Effect):
         rate = 6.0 if target > self._visible else 1.5
         self._visible += (target - self._visible) * (1 - math.exp(-dt * rate))
 
-        self._update_expansion(dt)
+        k = 1 - math.exp(-dt * EXPAND_SPEED)
+        self._expand += (self._expand_target - self._expand) * k
+        k = 1 - math.exp(-dt * 10)
+        self._radius += (self._radius_target - self._radius) * k
+        self._rotation += (self._rotation_target - self._rotation) * k
+
         self._update_particles(dt)
         self._update_sparks(dt, previous)
         self._refresh_labels(dt)
@@ -206,38 +243,28 @@ class EnergyBall(Effect):
         else:
             self._ball += (anchor - self._ball) * (1 - math.exp(-dt * BALL_FOLLOW))
 
-    def _update_expansion(self, dt: float):
-        self._expand += (self._expand_target - self._expand) * (1 - math.exp(-dt * EXPAND_SPEED))
-        if self._frame_target is not None:
-            center, axes, angle = self._frame_target
-            if self._center is None:
-                self._center, self._axes, self._angle = center.copy(), axes.copy(), angle
-            k = 1 - math.exp(-dt * 12)
-            self._center += (center - self._center) * k
-            self._axes += (axes - self._axes) * k
-            self._angle += (angle - self._angle) * k
-
-        if self._center is None:
-            self._core = self._ball
-        else:
-            self._core = self._ball + (self._center - self._ball) * self._expand
-
     def _update_particles(self, dt: float):
-        breathing = 1 + 0.25 * np.sin(self._time * 2.4 + self._phase)
-        home = self._core + self._compact * breathing[:, None]
+        t, e = self._time, self._expand
+        breathing = 1 + 0.12 * np.sin(t * 2.2 + self._phase)
 
-        if self._center is not None and self._expand > 0.001:
-            cloud = _rotate(self._spread, self._time * 0.18) * self._axes
-            cloud = _rotate(cloud, self._angle) + self._center
-            drift = np.stack(
-                [np.sin(self._time * 0.9 + self._phase), np.cos(self._time * 0.7 + self._phase * 1.3)], axis=1
-            ) * 6
-            home = home * (1 - self._expand) + (cloud + drift) * self._expand
+        compact, compact_z = _orbit(
+            self._r * 0.8 + 0.2, self._theta + self._spin_compact * t, 0, self._tilt_compact, self._node_compact
+        )
+        compact = compact * (COMPACT_RADIUS * breathing)[:, None]
+        target, depth = compact, compact_z / 1.0
 
+        if e > 0.001:
+            disk, disk_z = _orbit(self._r, self._theta + self._spin_disk * t, self._height, DISK_TILT, self._rotation)
+            disk = disk * self._radius
+            target = compact * (1 - e) + disk * e
+            depth = compact_z * (1 - e) + disk_z / 1.5 * e
+
+        target = target + self._ball
+        self._depth = np.clip(depth, -1, 1)
         if self._particles is None:
-            self._particles = home.copy()
+            self._particles = target.copy()
         else:
-            self._particles += (home - self._particles) * (1 - np.exp(-dt * self._stiffness))
+            self._particles += (target - self._particles) * (1 - np.exp(-dt * self._stiffness))
 
     def _update_sparks(self, dt: float, previous: np.ndarray | None):
         if previous is not None and dt > 0:
@@ -277,45 +304,36 @@ class EnergyBall(Effect):
         p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        twinkle = 0.55 + 0.45 * np.sin(self._time * 5 + self._phase)
-        for (x, y), size, shine in zip(self._particles, self._size, twinkle):
-            draw_glow(p, x, y, size, visible * shine * 0.9)
+        # partículas mais perto da câmera ficam maiores e mais fortes
+        near = (self._depth + 1) / 2
+        twinkle = 0.6 + 0.4 * np.sin(self._time * 5 + self._phase)
+        strength = visible * twinkle * (0.45 + 0.55 * near)
+        scale = 0.75 + 0.5 * near
+        for (x, y), size, tint, power, grow in zip(self._particles, self._size, self._tint, strength, scale):
+            draw_glow(p, x, y, size * grow, power, TINTS[tint])
 
         for x, y, _, _, life in self._sparks:
             draw_glow(p, x, y, 3.5, visible * min(life * 2, 1.0) * 0.8)
 
-        if expand > 0.02 and self._center is not None:
-            self._draw_ring(p, visible * expand)
+        self._draw_labels(p, visible, expand, near)
 
-        self._draw_labels(p, visible, expand)
-
-        bloom = 70 + 6 * math.sin(self._time * 7)
-        draw_glow(p, self._core[0], self._core[1], bloom, visible * 0.55)
-        draw_glow(p, self._core[0], self._core[1], 26, visible)
-        draw_glow(p, self._core[0], self._core[1], 12, visible)
+        x, y = self._ball
+        bloom = 58 + 5 * math.sin(self._time * 7) + 30 * expand
+        draw_glow(p, x, y, bloom, visible * 0.45, ICE)
+        draw_glow(p, x, y, 22, visible)
+        draw_glow(p, x, y, 10, visible)
         p.restore()
 
-    def _draw_ring(self, p: QPainter, strength: float):
-        p.save()
-        p.setOpacity(strength)
-        p.translate(point(self._center))
-        p.rotate(math.degrees(self._angle))
-        rx, ry = float(self._axes[0]), float(self._axes[1])
-        for width, alpha in ((6, 45), (1.4, 230)):
-            p.setPen(QPen(QColor(255, 255, 255, alpha), width))
-            p.drawEllipse(QPointF(0, 0), rx, ry)
-        p.restore()
-
-    def _draw_labels(self, p: QPainter, visible: float, expand: float):
+    def _draw_labels(self, p: QPainter, visible: float, expand: float, near: np.ndarray):
         p.setFont(mono_font(10))
         for order, index in enumerate(self._labeled):
-            strength = visible * (1.0 if order < COMPACT_LABELS else expand) * 0.85
-            if strength < 0.02:
+            strength = visible * (1.0 if order < COMPACT_LABELS else expand) * (0.35 + 0.65 * near[index])
+            if strength < 0.03:
                 continue
             x, y = self._particles[index]
             size = float(self._size[index])
-            p.setOpacity(strength)
-            p.setPen(QPen(QColor(255, 255, 255, 200), 1))
+            p.setOpacity(strength * 0.85)
+            p.setPen(QPen(QColor(220, 232, 255, 210), 1))
             if size > 8:
-                p.drawEllipse(QPointF(x, y), size * 0.9, size * 0.9)
-            p.drawText(QPointF(x + size + 3, y + 3), self._labels[int(index)])
+                p.drawEllipse(QPointF(x, y), size * 0.8, size * 0.8)
+            p.drawText(QPointF(x + size * 0.6 + 4, y + 3), self._labels[int(index)])
