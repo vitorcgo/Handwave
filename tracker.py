@@ -20,9 +20,8 @@ MODEL_PATH = Path(__file__).resolve().parent / "hand_landmarker.task"
 HAND_CONNECTIONS = [(c.start, c.end) for c in vision.HandLandmarksConnections.HAND_CONNECTIONS]
 FINGERTIPS = (4, 8, 12, 16, 20)
 
-INPUT_SIZE = 640
-MATCH_DISTANCE = 0.18
-HOLD_FRAMES = 4
+MATCH_DISTANCE = 0.3
+HOLD_FRAMES = 6
 
 
 @dataclass
@@ -92,9 +91,11 @@ class HandTracker:
             base_options=BaseOptions(model_asset_path=str(ensure_model())),
             running_mode=vision.RunningMode.VIDEO,
             num_hands=max_hands,
-            min_hand_detection_confidence=0.6,
-            min_hand_presence_confidence=0.6,
-            min_tracking_confidence=0.6,
+            # limites baixos seguram a mão em movimento, com borrão ou tatuagem;
+            # o filtro e a associação por posição cuidam do ruído que sobra
+            min_hand_detection_confidence=0.5,
+            min_hand_presence_confidence=0.3,
+            min_tracking_confidence=0.3,
         )
         self._landmarker = vision.HandLandmarker.create_from_options(options)
         self._tracks: list[_Track] = []
@@ -130,7 +131,7 @@ class HandTracker:
         square = cv2.copyMakeBorder(
             rgb, top, side - height - top, left, side - width - left, cv2.BORDER_CONSTANT, value=0
         )
-        square = np.ascontiguousarray(cv2.resize(square, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_AREA))
+        square = np.ascontiguousarray(square)
         offset = np.array([left / side, top / side])
         scale = np.array([side / width, side / height])
         return square, scale, offset
