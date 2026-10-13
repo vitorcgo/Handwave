@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 
 import numpy as np
@@ -17,9 +18,12 @@ from PySide6.QtGui import (
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QAbstractButton, QHBoxLayout, QLabel, QWidget
 
+from effects.base import Effect
+from gestures import GestureReader
 from tracker import FINGERTIPS, HAND_CONNECTIONS, Hand
 
 LOGO = Path(__file__).resolve().parent / "logo.png"
+EFFECT_DIM = 110
 
 # Ícones no estilo Lucide, desenhados com traço branco
 ICONS = {
@@ -70,9 +74,10 @@ def logo_mark(height: int) -> QPixmap:
 
 
 def icon_renderer(name: str) -> QSvgRenderer:
+    """Aceita o nome de um ícone de ICONS ou o próprio conteúdo SVG."""
     svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="white" '
-        f'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">{ICONS[name]}</svg>'
+        f'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">{ICONS.get(name, name)}</svg>'
     )
     return QSvgRenderer(QByteArray(svg.encode()))
 
@@ -245,6 +250,12 @@ class CameraView(QWidget):
         self._toast_timer.timeout.connect(lambda: self.show_toast(""))
         self.show_hands = True
         self.paused = False
+        self.effect: Effect | None = None
+        self._gestures = GestureReader()
+        self._last_tick = time.perf_counter()
+        self._clock = QTimer(self, interval=16)
+        self._clock.timeout.connect(self._advance)
+        self._clock.start()
         self.setMinimumSize(480, 320)
 
     def sizeHint(self):
@@ -253,6 +264,22 @@ class CameraView(QWidget):
     def set_frame(self, frame: QImage, hands: list[Hand]):
         self._frame = frame
         self._hands = hands
+        poses = self._gestures.read(hands, frame.width(), frame.height(), time.perf_counter())
+        if self.effect is not None:
+            self.effect.set_hands(poses)
+        self.update()
+
+    def set_effect(self, effect: Effect | None):
+        self.effect = effect
+        self.update()
+
+    def _advance(self):
+        now = time.perf_counter()
+        dt = min(now - self._last_tick, 0.05)
+        self._last_tick = now
+        if self.effect is None or self.paused or self._frame is None:
+            return
+        self.effect.tick(dt)
         self.update()
 
     def set_message(self, message: str):
@@ -275,6 +302,9 @@ class CameraView(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         if self.show_hands:
             self._draw_hands(p, QRectF(image.rect()))
+        if self.effect is not None:
+            p.fillRect(image.rect(), QColor(0, 0, 10, EFFECT_DIM))
+            self.effect.draw(p)
         p.end()
         return image
 
@@ -307,6 +337,15 @@ class CameraView(QWidget):
             p.drawImage(image_rect, self._frame)
             if self.show_hands:
                 self._draw_hands(p, image_rect)
+            if self.effect is not None:
+                # escurece o vídeo para a luz aditiva dos efeitos não estourar em fundo claro
+                p.fillRect(image_rect, QColor(0, 0, 10, EFFECT_DIM))
+                p.save()
+                p.translate(image_rect.topLeft())
+                scale = image_rect.width() / self._frame.width()
+                p.scale(scale, scale)
+                self.effect.draw(p)
+                p.restore()
         p.restore()
 
         p.setBrush(Qt.BrushStyle.NoBrush)

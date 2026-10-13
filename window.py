@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from blur import enable_blur, set_round_region
 from camera import CameraWorker
+from effects import EFFECTS
 from widgets import CameraView, Separator, SideButton, TitleBar
 
 RADIUS = 26
@@ -33,13 +34,19 @@ class MainWindow(QWidget):
 
         self.camera_view = CameraView(self)
 
-        self.hands_button = SideButton("hand", "Mostrar mãos")
+        self.hands_button = SideButton("hand", "Ocultar traçado das mãos")
         self.hands_button.setChecked(True)
         self.hands_button.toggled.connect(self._set_show_hands)
 
         self.mirror_button = SideButton("mirror", "Espelhar imagem")
         self.mirror_button.setChecked(True)
         self.mirror_button.toggled.connect(self._set_mirror)
+
+        self.effect_buttons = []
+        for effect_class in EFFECTS:
+            button = SideButton(effect_class.icon, effect_class.name)
+            button.toggled.connect(lambda on, cls=effect_class, b=button: self._toggle_effect(cls, b, on))
+            self.effect_buttons.append(button)
 
         self.switch_button = SideButton("switch", "Trocar câmera", checkable=False)
         self.switch_button.clicked.connect(self._switch_camera)
@@ -56,6 +63,10 @@ class MainWindow(QWidget):
         sidebar.addStretch()
         sidebar.addWidget(self.hands_button)
         sidebar.addWidget(self.mirror_button)
+        if self.effect_buttons:
+            sidebar.addWidget(Separator())
+            for button in self.effect_buttons:
+                sidebar.addWidget(button)
         sidebar.addWidget(Separator())
         sidebar.addWidget(self.switch_button)
         sidebar.addWidget(self.pause_button)
@@ -80,6 +91,9 @@ class MainWindow(QWidget):
         self.worker.notice.connect(self.camera_view.show_toast)
         self.worker.start()
 
+        if self.effect_buttons:
+            self.effect_buttons[0].setChecked(True)
+
     def _on_frame(self, frame, hands, fps):
         self.camera_view.set_frame(frame, hands)
 
@@ -89,8 +103,18 @@ class MainWindow(QWidget):
 
     def _set_show_hands(self, visible):
         self.camera_view.show_hands = visible
-        self.hands_button.setToolTip("Ocultar mãos" if visible else "Mostrar mãos")
+        self.hands_button.setToolTip("Ocultar traçado das mãos" if visible else "Mostrar traçado das mãos")
         self.camera_view.update()
+
+    def _toggle_effect(self, effect_class, button, on):
+        # um efeito por vez: ligar um desliga os outros
+        if on:
+            for other in self.effect_buttons:
+                if other is not button:
+                    other.setChecked(False)
+            self.camera_view.set_effect(effect_class())
+        elif isinstance(self.camera_view.effect, effect_class):
+            self.camera_view.set_effect(None)
 
     def _set_mirror(self, mirror):
         self.worker.mirror = mirror

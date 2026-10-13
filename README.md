@@ -134,7 +134,10 @@ flowchart TB
     window --> blur[blur.py<br/>acrylic e recorte da janela]
     window --> camera[camera.py<br/>CameraWorker]
     camera --> tracker[tracker.py<br/>HandTracker]
-    widgets --> tracker
+    widgets --> gestures[gestures.py<br/>GestureReader]
+    widgets --> effects[effects/<br/>efeitos registrados]
+    effects --> gestures
+    gestures --> tracker
     tracker --> model[(hand_landmarker.task)]
 ```
 
@@ -145,7 +148,59 @@ flowchart TB
 | `widgets.py` | Componentes visuais: vídeo com esqueleto das mãos, botões e barra de título |
 | `camera.py` | Thread que encontra a câmera, captura quadros e chama o rastreador |
 | `tracker.py` | Envolve o MediaPipe, baixa o modelo e suaviza os pontos |
+| `gestures.py` | Interpreta cada mão: dedo apontando, gesto de L, velocidade da ponta do indicador |
+| `effects/` | Um arquivo por efeito, todos seguindo o mesmo contrato |
 | `blur.py` | Chamadas nativas do Windows para o desfoque e os cantos arredondados |
+
+---
+
+## Efeitos
+
+Cada efeito mora em um arquivo próprio dentro de `effects/` e segue o contrato de `effects/base.py`. A barra lateral monta os botões sozinha a partir da lista em `effects/__init__.py`, e só um efeito fica ativo por vez.
+
+```mermaid
+flowchart LR
+    A[Quadro da câmera] --> B[HandTracker<br/>21 pontos por mão]
+    B --> C[GestureReader<br/>pose, gestos e velocidade]
+    C -->|set_hands a cada quadro| D[Efeito ativo]
+    E[Relógio de 60 fps] -->|tick| D
+    D -->|draw| F[CameraView]
+```
+
+| Método | Quando é chamado | Para que serve |
+|---|---|---|
+| `set_hands(poses)` | A cada quadro novo da câmera | Ler as mãos e decidir o que o efeito faz |
+| `tick(dt)` | 60 vezes por segundo | Animar, mesmo entre quadros da câmera |
+| `draw(painter)` | A cada repintura | Desenhar por cima do vídeo, em pixels do quadro |
+
+### Bola de energia
+
+<img src="https://api.iconify.design/lucide/orbit.svg?color=%234078ff" width="20"> Um orbe de luz com partículas e números em estilo ASCII, inspirado em efeitos feitos no TouchDesigner.
+
+```mermaid
+stateDiagram-v2
+    [*] --> NoDedo: indicador apontando
+    NoDedo --> Voando: peteleco na direção da outra mão
+    Voando --> NoDedo: chega ao indicador da outra mão
+    NoDedo --> Expandida: L com as duas mãos
+    Expandida --> NoDedo: desfaz o L
+    NoDedo --> [*]: mão sai da câmera
+```
+
+| Gesto | Resultado |
+|---|---|
+| Apontar com o indicador | A bola aparece e acompanha a ponta do dedo |
+| Peteleco rápido na direção da outra mão | A bola voa em arco até o outro indicador, deixando rastro |
+| L com as duas mãos | A bola se abre numa nuvem com anel elíptico entre as mãos |
+| Desfazer o L | A nuvem se recolhe de volta para a bola |
+
+### Criando um efeito novo
+
+1. Crie `effects/meu_efeito.py` com uma classe que herda de `Effect`, definindo `name` e `icon`
+2. Implemente `set_hands`, `tick` e `draw`
+3. Adicione a classe na lista `EFFECTS` em `effects/__init__.py`
+
+Com `python dev.py` rodando, o app recarrega a cada arquivo salvo.
 
 ---
 
@@ -213,8 +268,9 @@ flowchart LR
 
 | | Botão | Função |
 |:-:|---|---|
-| <img src="https://api.iconify.design/lucide/hand.svg?color=%234078ff" width="20"> | Mãos | Mostra ou oculta o esqueleto das mãos |
+| <img src="https://api.iconify.design/lucide/hand.svg?color=%234078ff" width="20"> | Mãos | Mostra ou oculta o traçado das mãos; o rastreamento continua ativo |
 | <img src="https://api.iconify.design/lucide/flip-horizontal.svg?color=%234078ff" width="20"> | Espelhar | Inverte a imagem horizontalmente |
+| <img src="https://api.iconify.design/lucide/orbit.svg?color=%234078ff" width="20"> | Bola de energia | Liga ou desliga o efeito; só um efeito fica ativo por vez |
 | <img src="https://api.iconify.design/lucide/switch-camera.svg?color=%234078ff" width="20"> | Trocar câmera | Passa para a próxima câmera conectada |
 | <img src="https://api.iconify.design/lucide/pause.svg?color=%234078ff" width="20"> | Pausar | Congela a imagem até clicar de novo |
 | <img src="https://api.iconify.design/lucide/camera.svg?color=%234078ff" width="20"> | Foto | Salva o quadro com as mãos desenhadas em Imagens/Handwave |
@@ -231,6 +287,12 @@ Handwave/
 ├── widgets.py           Componentes visuais
 ├── camera.py            Captura em thread separada
 ├── tracker.py           Rastreamento de mãos
+├── gestures.py          Leitura de gestos
+├── effects/
+│   ├── __init__.py      Registro dos efeitos
+│   ├── base.py          Contrato de um efeito
+│   ├── render.py        Brilho e fonte compartilhados
+│   └── energy_ball.py   Bola de energia
 ├── blur.py              Efeito de vidro no Windows
 ├── logo.png             Identidade visual
 └── requirements.txt     Dependências
@@ -264,7 +326,7 @@ flowchart LR
         A3[Interface de vidro]
     end
     subgraph F2[Fase 2: Efeitos]
-        B1[Energia entre as mãos]
+        B1[Bola de energia]
         B2[Ondas]
         B3[Foco]
         B4[Fogo]
@@ -282,7 +344,7 @@ flowchart LR
 - [x] Rastreamento de até duas mãos
 - [x] Interface de vidro com controles na barra lateral
 - [x] Mostrar mãos, espelhar, trocar câmera, pausar e salvar foto
-- [ ] **Energia:** partículas e um núcleo de luz que se formam entre as duas mãos e reagem à distância entre elas
+- [x] **Bola de energia:** orbe no indicador, passagem entre as mãos por peteleco e expansão com o gesto de L
 - [ ] **Ondas:** rastros suaves que seguem as pontas dos dedos
 - [ ] **Foco:** um anel que acompanha a pinça entre polegar e indicador
 - [ ] **Fogo:** chamas saindo das pontas dos dedos, com intensidade pela velocidade da mão

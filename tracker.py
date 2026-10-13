@@ -1,3 +1,4 @@
+import itertools
 import math
 import shutil
 import ssl
@@ -26,6 +27,7 @@ HOLD_FRAMES = 6
 
 @dataclass
 class Hand:
+    id: int
     side: str
     points: list[tuple[float, float]]
 
@@ -73,12 +75,16 @@ class OneEuroFilter:
         return self._value
 
 
+_track_ids = itertools.count(1)
+
+
 @dataclass
 class _Track:
     side: str
     points: np.ndarray
     filter: OneEuroFilter = field(default_factory=OneEuroFilter)
     missed: int = 0
+    id: int = field(default_factory=lambda: next(_track_ids))
 
     @property
     def center(self) -> np.ndarray:
@@ -118,7 +124,7 @@ class HandTracker:
             detections.append((handedness[0].category_name, points))
 
         self._update_tracks(detections, dt)
-        return [Hand(t.side, [tuple(p) for p in t.points]) for t in self._tracks]
+        return [Hand(t.id, t.side, [tuple(p) for p in t.points]) for t in self._tracks]
 
     @staticmethod
     def _to_square(rgb: np.ndarray):
