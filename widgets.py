@@ -252,6 +252,7 @@ class CameraView(QWidget):
         self.paused = False
         self.effect: Effect | None = None
         self._gestures = GestureReader()
+        self._gesture_labels: dict[int, str] = {}
         self._last_tick = time.perf_counter()
         self._clock = QTimer(self, interval=16)
         self._clock.timeout.connect(self._advance)
@@ -265,6 +266,7 @@ class CameraView(QWidget):
         self._frame = frame
         self._hands = hands
         poses = self._gestures.read(hands, frame.width(), frame.height(), time.perf_counter())
+        self._gesture_labels = {pose.id: pose.label for pose in poses}
         if self.effect is not None:
             self.effect.set_hands(poses)
         self.update()
@@ -393,3 +395,21 @@ class CameraView(QWidget):
                 p.setBrush(QColor(255, 255, 255))
                 core = 2.8 if index in FINGERTIPS else 2.0
                 p.drawEllipse(point, core, core)
+
+            label = self._gesture_labels.get(hand.id)
+            if label:
+                self._draw_gesture_label(p, label, points[0])
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+    def _draw_gesture_label(self, p: QPainter, text: str, wrist: QPointF):
+        font = self.font()
+        font.setPointSizeF(9)
+        font.setWeight(QFont.Weight.DemiBold)
+        p.setFont(font)
+        width = p.fontMetrics().horizontalAdvance(text) + 20
+        pill = QRectF(wrist.x() - width / 2, wrist.y() + 14, width, 22)
+        p.setPen(QPen(QColor(150, 185, 255, 160), 1))
+        p.setBrush(QColor(20, 40, 110, 200))
+        p.drawRoundedRect(pill, 11, 11)
+        p.setPen(QColor(255, 255, 255, 235))
+        p.drawText(pill, Qt.AlignmentFlag.AlignCenter, text)

@@ -23,6 +23,7 @@ FINGERTIPS = (4, 8, 12, 16, 20)
 
 MATCH_DISTANCE = 0.3
 HOLD_FRAMES = 6
+CONFIRM_FRAMES = 3
 
 
 @dataclass
@@ -30,6 +31,8 @@ class Hand:
     id: int
     side: str
     points: list[tuple[float, float]]
+    # pontos em 3D, em metros e centrados na mão; servem para ler a pose em qualquer rotação
+    world: np.ndarray | None = None
 
 
 def ensure_model() -> Path:
@@ -83,8 +86,14 @@ class _Track:
     side: str
     points: np.ndarray
     filter: OneEuroFilter = field(default_factory=OneEuroFilter)
+    world: np.ndarray | None = None
     missed: int = 0
+    hits: int = 1
     id: int = field(default_factory=lambda: next(_track_ids))
+
+    @property
+    def confirmed(self) -> bool:
+        return self.hits >= CONFIRM_FRAMES
 
     @property
     def center(self) -> np.ndarray:
@@ -97,11 +106,11 @@ class HandTracker:
             base_options=BaseOptions(model_asset_path=str(ensure_model())),
             running_mode=vision.RunningMode.VIDEO,
             num_hands=max_hands,
-            # limites baixos seguram a mão em movimento, com borrão ou tatuagem;
-            # o filtro e a associação por posição cuidam do ruído que sobra
-            min_hand_detection_confidence=0.5,
-            min_hand_presence_confidence=0.3,
-            min_tracking_confidence=0.3,
+            # mão nova precisa de confiança alta para não confundir rosto com mão;
+            # mão já rastreada usa limite baixo para não sumir com borrão ou tatuagem
+            min_hand_detection_confidence=0.7,
+            min_hand_presence_confidence=0.4,
+            min_tracking_confidence=0.4,
         )
         self._landmarker = vision.HandLandmarker.create_from_options(options)
         self._tracks: list[_Track] = []
@@ -118,13 +127,16 @@ class HandTracker:
         result = self._landmarker.detect_for_video(image, timestamp_ms)
 
         detections = []
-        for landmarks, handedness in zip(result.hand_landmarks, result.handedness):
+        for landmarks, world, handedness in zip(result.hand_landmarks, result.hand_world_landmarks, result.handedness):
             points = np.array([(p.x, p.y) for p in landmarks], dtype=np.float64)
             points = (points - offset) * scale
-            detections.append((handedness[0].category_name, points))
+            world = np.array([(p.x, p.y, p.z) for p in world], dtype=np.float64)
+            detections.append((handedness[0].category_name, points, world))
 
         self._update_tracks(detections, dt)
-        return [Hand(t.id, t.side, [tuple(p) for p in t.points]) for t in self._tracks]
+        return [
+            Hand(t.id, t.side, [tuple(p) for p in t.points], t.world) for t in self._tracks if t.confirmed
+        ]
 
     @staticmethod
     def _to_square(rgb: np.ndarray):
@@ -146,7 +158,7 @@ class HandTracker:
         unmatched = list(range(len(self._tracks)))
         matched = []
 
-        for side, points in detections:
+        for side, points, world in detections:
             center = points[[0, 5, 9, 13, 17]].mean(axis=0)
             best, best_distance = None, MATCH_DISTANCE
             for index in unmatched:
@@ -162,13 +174,16 @@ class HandTracker:
                 track = self._tracks[best]
                 track.side = side
                 track.missed = 0
+                track.hits += 1
                 track.points = track.filter(points, dt)
+            track.world = world
             matched.append(track)
 
         for index in unmatched:
             track = self._tracks[index]
             track.missed += 1
-            if track.missed <= HOLD_FRAMES:
+            # só mão confirmada ganha tolerância; candidata que falha é descartada na hora
+            if track.confirmed and track.missed <= HOLD_FRAMES:
                 matched.append(track)
 
         self._tracks = matched

@@ -182,7 +182,7 @@ stateDiagram-v2
     [*] --> NoDedo: indicador apontando
     NoDedo --> Voando: peteleco na direção da outra mão
     Voando --> NoDedo: chega ao indicador da outra mão
-    NoDedo --> Expandida: L com as duas mãos
+    NoDedo --> Expandida: L com a outra mão
     Expandida --> NoDedo: desfaz o L
     NoDedo --> [*]: mão sai da câmera
 ```
@@ -191,7 +191,7 @@ stateDiagram-v2
 |---|---|
 | Apontar com o indicador | A bola aparece e acompanha a ponta do dedo |
 | Peteleco rápido na direção da outra mão | A bola voa em arco até o outro indicador, deixando rastro |
-| L com as duas mãos | A bola se abre numa nuvem com anel elíptico entre as mãos |
+| L com a outra mão | A bola se abre numa nuvem com anel elíptico ao longo do dedo que a segura; quanto mais longe a mão do L, maior a nuvem |
 | Desfazer o L | A nuvem se recolhe de volta para a bola |
 
 ### Criando um efeito novo

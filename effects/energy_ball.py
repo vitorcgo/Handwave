@@ -1,23 +1,25 @@
 import math
 
 import numpy as np
-from PySide6.QtCore import QPointF
+from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen
 
 from effects.base import Effect
 from effects.render import draw_glow, mono_font, point
-from gestures import THUMB_TIP, INDEX_MCP, HandPose
+from gestures import HandPose
 
 CLOUD_SIZE = 240
 LABELED_RATIO = 0.25
 COMPACT_LABELS = 7
 
-FLICK_SPEED = 1500
-FLICK_ALIGNMENT = 0.5
+FLICK_SPEED = 700
+FLICK_ALIGNMENT = 0.35
 FLIGHT_TIME = 0.4
 TRANSFER_COOLDOWN = 0.6
 BALL_FOLLOW = 22.0
 EXPAND_SPEED = 5.0
+EXPAND_MIN = 110
+EXPAND_MAX = 320
 
 ASCII = list("+*:.=#%-~<>|")
 
@@ -31,7 +33,7 @@ class EnergyBall(Effect):
     """Orbe de luz na ponta do indicador.
 
     Peteleco na direção da outra mão lança a bola até ela.
-    L com as duas mãos abre a bola numa nuvem com um anel entre as mãos.
+    L com a outra mão abre a bola numa nuvem com um anel ao longo do dedo que a segura.
     """
 
     name = "Bola de energia"
@@ -91,10 +93,14 @@ class EnergyBall(Effect):
     # entrada
 
     def set_hands(self, poses: list[HandPose]):
+        last_owner = self._poses.get(self._owner)
         self._poses = {pose.id: pose for pose in poses}
 
         if self._owner not in self._poses:
             self._owner = None
+            # a mão some no meio de um peteleco rápido; o último movimento dela ainda vale
+            if last_owner is not None:
+                self._check_flick(last_owner)
         if self._flight and self._flight["target"] not in self._poses:
             self._flight = None
 
@@ -106,42 +112,45 @@ class EnergyBall(Effect):
                 else:
                     self._owner = min(pointing, key=lambda pose: np.linalg.norm(pose.index_tip - self._ball)).id
 
-        self._check_flick()
+        owner = self._poses.get(self._owner)
+        if owner is not None:
+            self._check_flick(owner)
         self._read_frame_gesture(poses)
 
-    def _check_flick(self):
-        owner = self._poses.get(self._owner)
-        if owner is None or self._flight or self._cooldown > 0 or self._expand > 0.3 or self._ball is None:
+    def _check_flick(self, owner: HandPose):
+        if self._flight or self._cooldown > 0 or self._expand > 0.3 or self._ball is None:
             return
         others = [pose for pose in self._poses.values() if pose.id != owner.id]
-        speed = float(np.linalg.norm(owner.velocity))
+        velocity = owner.peak_velocity
+        speed = float(np.linalg.norm(velocity))
         if not others or speed < FLICK_SPEED:
             return
 
         target = min(others, key=lambda pose: np.linalg.norm(pose.index_tip - owner.index_tip))
         direction = target.index_tip - owner.index_tip
         distance = float(np.linalg.norm(direction))
-        if distance < 1 or float(np.dot(owner.velocity / speed, direction / distance)) < FLICK_ALIGNMENT:
+        if distance < 1 or float(np.dot(velocity / speed, direction / distance)) < FLICK_ALIGNMENT:
             return
 
         self._flight = {"start": self._ball.copy(), "target": target.id, "t": 0.0}
         self._owner = None
 
     def _read_frame_gesture(self, poses: list[HandPose]):
-        framing = [pose for pose in poses if pose.l_shape]
-        if len(framing) < 2:
+        owner = self._poses.get(self._owner)
+        framing = [pose for pose in poses if owner is not None and pose.id != owner.id and pose.l_shape]
+        if not framing:
             self._expand_target = 0.0
             return
-        a, b = framing[:2]
-        center = np.mean([a.index_tip, a.points[THUMB_TIP], b.index_tip, b.points[THUMB_TIP]], axis=0)
-        line = b.points[INDEX_MCP] - a.points[INDEX_MCP]
-        span = max(float(np.linalg.norm(line)), 40.0)
-        angle = math.atan2(line[1], line[0])
-        if angle > math.pi / 2:
-            angle -= math.pi
-        elif angle < -math.pi / 2:
-            angle += math.pi
-        self._frame_target = (center, np.array([span * 0.42, span * 0.58]), angle)
+
+        # a nuvem cresce ao longo do dedo que segura a bola, com o tamanho pela distância entre as mãos
+        frame = framing[0]
+        spread = float(np.linalg.norm(frame.index_tip - owner.index_tip))
+        length = float(np.clip(spread * 0.45, EXPAND_MIN, EXPAND_MAX))
+        direction = owner.index_direction
+        center = owner.index_tip + direction * length * 0.75
+        angle = math.atan2(direction[1], direction[0]) - math.pi / 2
+        angle = (angle + math.pi / 2) % math.pi - math.pi / 2
+        self._frame_target = (center, np.array([length * 0.55, length]), angle)
         self._expand_target = 1.0
 
     @staticmethod
@@ -264,6 +273,7 @@ class EnergyBall(Effect):
         visible, expand = self._visible, self._expand
 
         p.save()
+        p.setBrush(Qt.BrushStyle.NoBrush)
         p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
