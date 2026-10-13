@@ -186,6 +186,23 @@ python main.py
 
 Na primeira execução o modelo de mãos (cerca de 7 MB) é baixado para a raiz do projeto. Depois disso o app abre direto.
 
+### Modo de desenvolvimento
+
+```bash
+python dev.py
+```
+
+Mantém o app aberto e reinicia automaticamente sempre que um arquivo `.py` do projeto é salvo.
+
+```mermaid
+flowchart LR
+    A[dev.py] --> B[Abre o Handwave]
+    B --> C{Arquivo .py salvo?}
+    C -- Sim --> D[Encerra o app]
+    D --> B
+    C -- Não --> C
+```
+
 | Ação | Como fazer |
 |---|---|
 | Mover a janela | Arraste pela faixa superior |
@@ -200,6 +217,7 @@ Na primeira execução o modelo de mãos (cerca de 7 MB) é baixado para a raiz 
 ```
 Handwave/
 ├── main.py              Ponto de entrada
+├── dev.py               Recarregamento automático
 ├── window.py            Janela principal
 ├── widgets.py           Componentes visuais
 ├── camera.py            Captura em thread separada

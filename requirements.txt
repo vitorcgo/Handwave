@@ -3,3 +3,4 @@ opencv-python>=4.9
 mediapipe>=0.10.14
 numpy
 certifi
+watchfiles
